@@ -1,0 +1,31 @@
+pluginManagement {
+    repositories {
+        google {
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "audio_recorder"
+include ':app'
+
+// :audioengine — git submodule at audioengine/ (https://github.com/minervarr/audio_engine.git)
+// Uncomment AFTER running `git submodule update --init --recursive` and
+// after that module is ready to be consumed. Also add the dependency in app/build.gradle.
+// include ':audioengine'
