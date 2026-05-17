@@ -1,5 +1,40 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Audio Recorder</string>
-    <string name="placeholder_message">Audio Recorder — not yet implemented</string>
+
+    <string name="no_device">Plug in a USB audio device</string>
+    <string name="device_no_capture">This device has no capture-capable formats</string>
+    <string name="device_format_summary">UAC%1$d · %2$d ch · up to %3$d Hz</string>
+    <string name="device_tap_to_grant">Tap to allow access</string>
+
+    <string name="format_sample_rate">Sample rate</string>
+    <string name="format_bit_depth">Bit depth</string>
+    <string name="format_channels">Channels</string>
+    <string name="format_rate_hz">%1$d Hz</string>
+    <string name="format_bits">%1$d-bit</string>
+    <string name="format_channels_value">%1$d ch</string>
+    <string name="format_unavailable">Format unavailable on this device</string>
+
+    <string name="record_start">Record</string>
+    <string name="record_stop">Stop</string>
+    <string name="record_elapsed">● REC %1$s</string>
+    <string name="monitor_label">Monitor via USB output</string>
+    <string name="volume_muted">muted</string>
+    <string name="volume_db_fmt">%1$+.1f dB</string>
+
+    <string name="request_permission_audio">Microphone access is required to record</string>
+    <string name="request_permission_usb">USB permission is required to access the device</string>
+    <string name="permission_denied">Permission denied</string>
+
+    <string name="recordings_header">Past recordings</string>
+    <string name="recordings_empty">No recordings yet</string>
+
+    <string name="recording_notification_channel">Recording</string>
+    <string name="recording_notification_channel_desc">Shows while audio is being recorded</string>
+    <string name="recording_notification_title">Recording</string>
+    <string name="recording_notification_text">Recording · %1$s</string>
+    <string name="recording_notification_starting">Starting…</string>
+    <string name="recording_notification_action_stop">Stop</string>
+
+    <string name="error_prefix">Error: %1$s</string>
 </resources>

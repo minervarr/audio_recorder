@@ -43,7 +43,7 @@ android {
 }
 
 dependencies {
-    // implementation project(':audioengine')  // enable after submodule is cloned and module included
+    implementation project(':audioengine')
     implementation libs.appcompat
     implementation libs.material
     implementation libs.constraintlayout

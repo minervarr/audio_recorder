@@ -1,0 +1,26 @@
+[
+{
+  "directory": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/build",
+  "command": "C:\\PPProgam\\android_sdk\\ndk\\29.0.14206865\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=armv7-none-linux-androideabi21 --sysroot=C:/PPProgam/android_sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dcalculator_EXPORTS -IC:/PPProgam/android_sdk/ndk/29.0.14206865/sources/android/native_app_glue -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -march=armv7-a -mthumb -Wformat -Werror=format-security   -fPIC -o CMakeFiles\\calculator.dir\\cpp\\calculator.cc.o -c C:\\Users\\incxiuefb\\Documents\\Files\\android_handmade\\calculator\\app\\src\\main\\cpp\\calculator.cc",
+  "file": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/cpp/calculator.cc",
+  "output": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/build/CMakeFiles/calculator.dir/cpp/calculator.cc.o"
+},
+{
+  "directory": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/build",
+  "command": "C:\\PPProgam\\android_sdk\\ndk\\29.0.14206865\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=armv7-none-linux-androideabi21 --sysroot=C:/PPProgam/android_sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dcalculator_EXPORTS -IC:/PPProgam/android_sdk/ndk/29.0.14206865/sources/android/native_app_glue -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -march=armv7-a -mthumb -Wformat -Werror=format-security   -fPIC -o CMakeFiles\\calculator.dir\\cpp\\app.cc.o -c C:\\Users\\incxiuefb\\Documents\\Files\\android_handmade\\calculator\\app\\src\\main\\cpp\\app.cc",
+  "file": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/cpp/app.cc",
+  "output": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/build/CMakeFiles/calculator.dir/cpp/app.cc.o"
+},
+{
+  "directory": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/build",
+  "command": "C:\\PPProgam\\android_sdk\\ndk\\29.0.14206865\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=armv7-none-linux-androideabi21 --sysroot=C:/PPProgam/android_sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dcalculator_EXPORTS -IC:/PPProgam/android_sdk/ndk/29.0.14206865/sources/android/native_app_glue -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -march=armv7-a -mthumb -Wformat -Werror=format-security   -fPIC -o CMakeFiles\\calculator.dir\\cpp\\renderer.cc.o -c C:\\Users\\incxiuefb\\Documents\\Files\\android_handmade\\calculator\\app\\src\\main\\cpp\\renderer.cc",
+  "file": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/cpp/renderer.cc",
+  "output": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/build/CMakeFiles/calculator.dir/cpp/renderer.cc.o"
+},
+{
+  "directory": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/build",
+  "command": "C:\\PPProgam\\android_sdk\\ndk\\29.0.14206865\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=armv7-none-linux-androideabi21 --sysroot=C:/PPProgam/android_sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dcalculator_EXPORTS -IC:/PPProgam/android_sdk/ndk/29.0.14206865/sources/android/native_app_glue -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -march=armv7-a -mthumb -Wformat -Werror=format-security  -fPIC -o CMakeFiles\\calculator.dir\\C_\\PPProgam\\android_sdk\\ndk\\29.0.14206865\\sources\\android\\native_app_glue\\android_native_app_glue.c.o -c C:\\PPProgam\\android_sdk\\ndk\\29.0.14206865\\sources\\android\\native_app_glue\\android_native_app_glue.c",
+  "file": "C:/PPProgam/android_sdk/ndk/29.0.14206865/sources/android/native_app_glue/android_native_app_glue.c",
+  "output": "C:/Users/incxiuefb/Documents/Files/android_handmade/calculator/app/src/main/build/CMakeFiles/calculator.dir/C_/PPProgam/android_sdk/ndk/29.0.14206865/sources/android/native_app_glue/android_native_app_glue.c.o"
+}
+]

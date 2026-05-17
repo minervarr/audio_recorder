@@ -24,8 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "audio_recorder"
 include ':app'
-
-// :audioengine — git submodule at audioengine/ (https://github.com/minervarr/audio_engine.git)
-// Uncomment AFTER running `git submodule update --init --recursive` and
-// after that module is ready to be consumed. Also add the dependency in app/build.gradle.
-// include ':audioengine'
+include ':audioengine'

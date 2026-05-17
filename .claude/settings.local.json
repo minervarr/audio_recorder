@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\incxiuefb\\\\Documents\\\\Files\\\\clone\\\\audio_recorder\" -Recurse -Directory)",
+      "Bash(Select-Object FullName)",
+      "PowerShell(head *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\incxiuefb\\\\Documents\\\\Files\\\\clone\\\\audio_recorder\" -Recurse -Include \"*.java\", \"AndroidManifest.xml\")",
+      "Bash(Select-Object -First 20)"
+    ]
+  }
+}
