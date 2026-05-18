@@ -40,6 +40,7 @@ import com.example.audio_recorder.databinding.ActivityMainBinding;
 import com.example.audio_recorder.databinding.ItemRecordingBinding;
 import com.example.audio_recorder.service.RecorderService;
 import com.example.audio_recorder.settings.AppSettings;
+import com.example.audio_recorder.ui.PlaybackSheet;
 import com.example.audio_recorder.usb.UsbAudioManager;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.nerio.audioengine.UsbAudioDevice;
@@ -64,6 +65,12 @@ public class MainActivity extends AppCompatActivity {
     private RecorderService service;
     private boolean bound;
 
+    /** Lets fragments (PlaybackSheet) drive the same bound service. */
+    @Nullable
+    public RecorderService getRecorderService() {
+        return service;
+    }
+
     private int selectedRate = 48000;
     private int selectedBits = 24;
     private int selectedChannels = 2;
@@ -73,10 +80,9 @@ public class MainActivity extends AppCompatActivity {
 
     // Monitor slider dB taper: slider 0 = mute, 1..1000 maps linearly in dB to
     // [MIN, MAX]. We then invert UsbAudioOutput's cube-root SW curve so the
-    // final on-DAC dB tracks the slider's dB. Caps the top so the rightmost
-    // position is loud-but-not-painful.
+    // final on-DAC dB tracks the slider's dB.
     private static final double MONITOR_DB_MIN = -45.0;
-    private static final double MONITOR_DB_MAX = -3.0;
+    private static final double MONITOR_DB_MAX = 0.0;
 
     private final List<RecordingEntry> recordings = new ArrayList<>();
     private RecordingsAdapter adapter;
@@ -894,16 +900,22 @@ public class MainActivity extends AppCompatActivity {
                     DateUtils.MINUTE_IN_MILLIS).toString();
             h.binding.recordingMeta.setText(size + "  ·  " + date);
             h.binding.getRoot().setOnClickListener(v -> {
-                Intent i = new Intent(Intent.ACTION_VIEW);
-                i.setDataAndType(e.uri, "audio/*");
-                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                try {
-                    startActivity(i);
-                } catch (Throwable t) {
+                if (service == null) {
                     Toast.makeText(MainActivity.this,
-                            "No app to play this recording",
+                            R.string.playback_open_failed,
                             Toast.LENGTH_SHORT).show();
+                    return;
                 }
+                if (service.getState() == RecorderService.State.RECORDING) {
+                    return;
+                }
+                String dacKey = null;
+                android.hardware.usb.UsbDevice usb = usbAudioManager.getConnectedDevice();
+                if (usb != null) {
+                    dacKey = AppSettings.dacKey(usb.getVendorId(), usb.getProductId());
+                }
+                PlaybackSheet sheet = PlaybackSheet.newInstance(e.uri, e.name, dacKey);
+                sheet.show(getSupportFragmentManager(), "playback");
             });
         }
 

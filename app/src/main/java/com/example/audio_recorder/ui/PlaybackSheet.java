@@ -6,6 +6,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -38,19 +39,29 @@ public class PlaybackSheet extends BottomSheetDialogFragment {
 
     private static final String ARG_URI = "uri";
     private static final String ARG_NAME = "name";
+    private static final String ARG_DAC_KEY = "dac_key";
     private static final long POSITION_POLL_MS = 250;
 
-    public static PlaybackSheet newInstance(Uri uri, String name) {
+    // Matches MainActivity's monitor slider taper so the cube-root mapping in
+    // UsbAudioOutput produces the same on-DAC dB at the same slider position.
+    private static final double DB_MIN = -45.0;
+    private static final double DB_MAX = 0.0;
+    private static final float DEFAULT_VOLUME_LINEAR = 0.857375f; // ≈ -3 dB after cube-root taper
+
+    public static PlaybackSheet newInstance(Uri uri, String name, String dacKey) {
         PlaybackSheet sheet = new PlaybackSheet();
         Bundle args = new Bundle();
         args.putParcelable(ARG_URI, uri);
         args.putString(ARG_NAME, name != null ? name : "");
+        args.putString(ARG_DAC_KEY, dacKey != null ? dacKey : "");
         sheet.setArguments(args);
         return sheet;
     }
 
     private Uri uri;
     private String name;
+    private String dacKey;
+    private float currentVolumeLinear = DEFAULT_VOLUME_LINEAR;
 
     private TextView nameLabel;
     private TextView signalPathLabel;
@@ -61,6 +72,8 @@ public class PlaybackSheet extends BottomSheetDialogFragment {
     private MaterialSwitch eqSwitch;
     private MaterialButton eqPickButton;
     private TextView eqStatusLabel;
+    private SeekBar volumeSeekBar;
+    private TextView volumeLabel;
 
     private final Handler tickHandler = new Handler(Looper.getMainLooper());
     private boolean userSeeking;
@@ -100,13 +113,33 @@ public class PlaybackSheet extends BottomSheetDialogFragment {
         if (args != null) {
             uri = args.getParcelable(ARG_URI);
             name = args.getString(ARG_NAME, "");
+            dacKey = args.getString(ARG_DAC_KEY, "");
+        }
+        AppSettings settings = new AppSettings(requireContext());
+        if (dacKey != null && !dacKey.isEmpty()) {
+            currentVolumeLinear = settings.getPlaybackVolume(dacKey, DEFAULT_VOLUME_LINEAR);
         }
     }
 
     @NonNull
     @Override
     public Dialog onCreateDialog(@Nullable Bundle savedInstanceState) {
-        return super.onCreateDialog(savedInstanceState);
+        Dialog d = super.onCreateDialog(savedInstanceState);
+        // Capture hardware volume keys so they drive the playback slider
+        // instead of the OS media slider — same UX as the recording-monitor
+        // path. Returning true on consume blocks the system handler.
+        d.setOnKeyListener((dialog, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+                bumpVolume(true);
+                return true;
+            } else if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                bumpVolume(false);
+                return true;
+            }
+            return false;
+        });
+        return d;
     }
 
     @Nullable
@@ -129,6 +162,20 @@ public class PlaybackSheet extends BottomSheetDialogFragment {
         eqSwitch = view.findViewById(R.id.playback_eq_switch);
         eqPickButton = view.findViewById(R.id.playback_eq_pick);
         eqStatusLabel = view.findViewById(R.id.playback_eq_status);
+        volumeSeekBar = view.findViewById(R.id.playback_volume_seekbar);
+        volumeLabel = view.findViewById(R.id.playback_volume_label);
+
+        volumeSeekBar.setProgress(linearToSliderProgress(
+                currentVolumeLinear, volumeSeekBar.getMax()));
+        updateVolumeLabel();
+        volumeSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
+                if (!fromUser) return;
+                applyVolumeFromSlider(progress, sb.getMax(), true);
+            }
+            @Override public void onStartTrackingTouch(SeekBar sb) {}
+            @Override public void onStopTrackingTouch(SeekBar sb) {}
+        });
 
         nameLabel.setText(name);
         signalPathLabel.setText(R.string.playback_via_speaker);
@@ -178,7 +225,7 @@ public class PlaybackSheet extends BottomSheetDialogFragment {
         if (svc != null) {
             Uri current = svc.getCurrentPlaybackUri();
             if (current == null || !current.equals(uri)) {
-                if (!svc.startPlayback(uri, playbackListener)) {
+                if (!svc.startPlayback(uri, currentVolumeLinear, playbackListener)) {
                     stopOnDismiss = false;
                     dismissAllowingStateLoss();
                     return;
@@ -327,5 +374,63 @@ public class PlaybackSheet extends BottomSheetDialogFragment {
         int m = totalSec / 60;
         int s = totalSec % 60;
         return String.format(java.util.Locale.US, "%d:%02d", m, s);
+    }
+
+    private void bumpVolume(boolean up) {
+        if (volumeSeekBar == null) return;
+        int max = volumeSeekBar.getMax();
+        int step = Math.max(1, max / 40);
+        int next = volumeSeekBar.getProgress() + (up ? step : -step);
+        if (next < 0) next = 0;
+        if (next > max) next = max;
+        volumeSeekBar.setProgress(next);
+        applyVolumeFromSlider(next, max, true);
+    }
+
+    private void applyVolumeFromSlider(int progress, int max, boolean persist) {
+        currentVolumeLinear = sliderProgressToLinear(progress, max);
+        updateVolumeLabel();
+        RecorderService svc = service();
+        if (svc != null) svc.setPlaybackVolume(currentVolumeLinear);
+        if (persist && dacKey != null && !dacKey.isEmpty()) {
+            new AppSettings(requireContext())
+                    .setPlaybackVolume(dacKey, currentVolumeLinear);
+        }
+    }
+
+    private void updateVolumeLabel() {
+        if (volumeLabel == null) return;
+        if (currentVolumeLinear <= 0f) {
+            volumeLabel.setText(R.string.volume_muted);
+            return;
+        }
+        double db = -60.0 * (1.0 - Math.cbrt(currentVolumeLinear));
+        volumeLabel.setText(getString(R.string.volume_db_fmt, db));
+    }
+
+    /**
+     * Slider position → linear gain for UsbAudioOutput's software cube-root
+     * taper. Identical math to MainActivity's monitor slider, so the on-DAC dB
+     * matches the slider position the user dragged.
+     */
+    private static float sliderProgressToLinear(int progress, int max) {
+        if (progress <= 0 || max <= 0) return 0f;
+        double frac = progress / (double) max;
+        double db = DB_MIN + frac * (DB_MAX - DB_MIN);
+        double cbrtL = 1.0 + db / 60.0;
+        if (cbrtL < 0) cbrtL = 0;
+        if (cbrtL > 1) cbrtL = 1;
+        double linear = cbrtL * cbrtL * cbrtL;
+        return (float) linear;
+    }
+
+    private static int linearToSliderProgress(float linear, int max) {
+        if (linear <= 0f) return 0;
+        if (linear > 1f) linear = 1f;
+        double db = -60.0 * (1.0 - Math.cbrt(linear));
+        double frac = (db - DB_MIN) / (DB_MAX - DB_MIN);
+        if (frac < 0) frac = 0;
+        if (frac > 1) frac = 1;
+        return (int) Math.round(frac * max);
     }
 }

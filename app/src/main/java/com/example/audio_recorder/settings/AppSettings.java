@@ -71,6 +71,17 @@ public class AppSettings {
         prefs.edit().putFloat("monitor_volume_" + dacKey, linear01).apply();
     }
 
+    public float getPlaybackVolume(String dacKey, float fallback) {
+        return prefs.getFloat("playback_volume_" + dacKey, fallback);
+    }
+
+    public void setPlaybackVolume(String dacKey, float linear01) {
+        if (Float.isNaN(linear01)) linear01 = 0f;
+        if (linear01 < 0f) linear01 = 0f;
+        if (linear01 > 1f) linear01 = 1f;
+        prefs.edit().putFloat("playback_volume_" + dacKey, linear01).apply();
+    }
+
     public String getLastDeviceKey() {
         return prefs.getString(KEY_LAST_DEVICE_KEY, null);
     }

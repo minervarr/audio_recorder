@@ -71,6 +71,17 @@ public class PlaybackEngine {
         this.listener = l;
     }
 
+    /**
+     * Sets the software-gain volume (cube-root taper inside UsbAudioOutput).
+     * Call this BEFORE {@link #play} so {@link com.nerio.audioengine.AudioEngine}'s
+     * stored volume state is non-zero when {@code switchOutput()} fires its
+     * {@code pushVolumeStateToOutput()} pass — otherwise the USB DAC sink
+     * starts at gain 0 (silence) on the first track.
+     */
+    public void setVolume(float linear01) {
+        player.getEngine().setVolume(linear01);
+    }
+
     public void play(Uri uri) {
         if (uri == null) return;
         player.play(context, uri);

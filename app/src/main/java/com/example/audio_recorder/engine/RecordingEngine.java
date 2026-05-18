@@ -8,6 +8,7 @@ import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.util.Log;
 
@@ -37,6 +38,7 @@ public class RecordingEngine {
     private Uri outputUri;
     private boolean monitoring;
     private long startMs;
+    private long lastSessionFrames;
 
     // Negotiated format snapshot, populated in start() and exposed to the UI
     // for the on-screen diagnostic + monitor-mismatch handling.
@@ -50,12 +52,47 @@ public class RecordingEngine {
         this.sink = sink;
     }
 
+    // Stuck-ADC recovery: after start, wait briefly for the first PCM packet to
+    // surface in the ring buffer. Some UAC2 devices accept SET_CUR but don't
+    // actually arm the ADC; the warm-up in usb_audio.cpp catches most cases,
+    // but if it doesn't, we tear down and re-arm once. See the project plan
+    // (when-i-press-recording-shimmying-globe).
+    private static final long FIRST_PACKET_DEADLINE_MS = 500;
+    private static final long FIRST_PACKET_POLL_MS = 10;
+
     public boolean start(int rate, int channels, int bits, boolean monitor, float monitorVolume)
             throws IOException {
         if (device == null || !device.isValid()) {
             Log.e(TAG, "start: invalid device");
             return false;
         }
+        lastSessionFrames = 0;
+        if (!attemptStart(rate, channels, bits, monitor, monitorVolume)) {
+            return false;
+        }
+        if (waitForFirstPacket(FIRST_PACKET_DEADLINE_MS)) {
+            startMs = System.currentTimeMillis();
+            return true;
+        }
+        Log.w(TAG, "start: first packet never arrived within "
+                + FIRST_PACKET_DEADLINE_MS + " ms; tearing down and retrying once");
+        teardownAttempt();
+        if (!attemptStart(rate, channels, bits, monitor, monitorVolume)) {
+            Log.e(TAG, "start: retry setup failed");
+            return false;
+        }
+        if (waitForFirstPacket(FIRST_PACKET_DEADLINE_MS)) {
+            Log.i(TAG, "start: retry succeeded — first packet arrived");
+            startMs = System.currentTimeMillis();
+            return true;
+        }
+        Log.e(TAG, "start: retry also failed; device is not producing data");
+        teardownAttempt();
+        return false;
+    }
+
+    private boolean attemptStart(int rate, int channels, int bits, boolean monitor,
+                                 float monitorVolume) throws IOException {
         UsbAudioInput input = device.getInput();
         if (!input.configure(rate, channels, bits)) {
             Log.e(TAG, "input.configure(" + rate + ", " + channels + ", " + bits + ") failed");
@@ -126,16 +163,57 @@ public class RecordingEngine {
                 }
             }
         }
-        String ts = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
-        tempFile = new File(context.getCacheDir(), "rec-" + ts + "." + sink.fileExtension());
+        if (tempFile == null) {
+            String ts = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
+            tempFile = new File(context.getCacheDir(), "rec-" + ts + "." + sink.fileExtension());
+        }
         if (!sink.beginRecording(tempFile, actualRate, actualChannels, actualBits)) {
             Log.e(TAG, "sink.beginRecording failed");
             input.stop();
             if (monitoring) device.getOutput().stop();
             return false;
         }
-        startMs = System.currentTimeMillis();
         return true;
+    }
+
+    private boolean waitForFirstPacket(long deadlineMs) {
+        UsbAudioInput input = device.getInput();
+        if (input == null) return false;
+        long deadline = SystemClock.elapsedRealtime() + deadlineMs;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (input.getFramesWritten() > 0) return true;
+            try {
+                Thread.sleep(FIRST_PACKET_POLL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return input.getFramesWritten() > 0;
+    }
+
+    // Unwind a failed attempt so we can re-arm from scratch. Mirrors stop()
+    // except we don't promote the empty file to MediaStore and we don't clear
+    // tempFile — startRecording() will truncate and rewrite it.
+    private void teardownAttempt() {
+        UsbAudioInput input = device.getInput();
+        if (input != null && monitoring) {
+            try { input.setMonitorOutput(null); } catch (Throwable ignored) {}
+        }
+        try { sink.endRecording(); } catch (Throwable t) {
+            Log.w(TAG, "teardownAttempt: sink.endRecording threw", t);
+        }
+        if (input != null) {
+            try { input.stop(); } catch (Throwable t) {
+                Log.w(TAG, "teardownAttempt: input.stop threw", t);
+            }
+        }
+        if (monitoring) {
+            try { device.getOutput().stop(); } catch (Throwable t) {
+                Log.w(TAG, "teardownAttempt: output.stop threw", t);
+            }
+            monitoring = false;
+        }
     }
 
     public void stop() {
@@ -151,6 +229,9 @@ public class RecordingEngine {
         } catch (Throwable t) {
             Log.w(TAG, "sink.endRecording threw", t);
         }
+        // Snapshot the frame count after the record thread has joined (sink.endRecording
+        // joins UsbAudioInput-WAV) but before input.stop() tears the native side down.
+        lastSessionFrames = input != null ? input.getFramesWritten() : 0;
         try {
             input.stop();
         } catch (Throwable t) {
@@ -164,6 +245,15 @@ public class RecordingEngine {
             }
             monitoring = false;
         }
+        if (lastSessionFrames <= 0) {
+            Log.w(TAG, "stop: no PCM frames captured; discarding empty WAV");
+            outputUri = null;
+            if (tempFile.exists() && !tempFile.delete()) {
+                Log.w(TAG, "temp file not deleted: " + tempFile);
+            }
+            tempFile = null;
+            return;
+        }
         try {
             outputUri = promoteToMediaStore(tempFile);
         } catch (IOException e) {
@@ -175,6 +265,11 @@ public class RecordingEngine {
             }
             tempFile = null;
         }
+    }
+
+    /** Final PCM frame count from the last stop(). Zero means nothing was captured. */
+    public long getCapturedFrames() {
+        return lastSessionFrames;
     }
 
     public void setMonitorVolume(float linear01) {

@@ -54,10 +54,10 @@ public class RecorderService extends Service {
     private final IBinder binder = new LocalBinder();
     private final List<StateListener> listeners = new ArrayList<>();
 
-    private UsbAudioDevice device;
-    private UsbDeviceConnection deviceConnection;
-    private UsbDevice usbDevice;
-    private RecordingEngine engine;
+    private volatile UsbAudioDevice device;
+    private volatile UsbDeviceConnection deviceConnection;
+    private volatile UsbDevice usbDevice;
+    private volatile RecordingEngine engine;
     private PlaybackEngine playbackEngine;
     private Uri currentPlaybackUri;
 
@@ -214,7 +214,20 @@ public class RecorderService extends Service {
             Log.w(TAG, "startRecording in state " + state);
             return;
         }
-        if (device == null) return;
+        UsbAudioDevice d = device;
+        UsbDeviceConnection conn = deviceConnection;
+        if (d == null || !d.isValid() || conn == null) {
+            Log.w(TAG, "startRecording: USB device no longer valid (device="
+                    + (d != null) + " valid=" + (d != null && d.isValid())
+                    + " conn=" + (conn != null) + ")");
+            transition(State.ERROR, "USB device disconnected");
+            if (d != null && d.isValid()) {
+                transition(State.DEVICE_READY, null);
+            } else {
+                transition(State.IDLE, null);
+            }
+            return;
+        }
         startForegroundSafely();
         controlHandler.post(() -> doStart(rate, channels, bits, monitor, monitorVolume));
     }
@@ -232,7 +245,8 @@ public class RecorderService extends Service {
 
     // --- Playback ---
 
-    public boolean startPlayback(Uri uri, PlaybackEngine.Listener listener) {
+    public boolean startPlayback(Uri uri, float initialVolume,
+                                 PlaybackEngine.Listener listener) {
         if (uri == null) return false;
         if (state == State.RECORDING) {
             Log.w(TAG, "startPlayback ignored: currently recording");
@@ -245,6 +259,10 @@ public class RecorderService extends Service {
         currentPlaybackUri = uri;
         AppSettings settings = new AppSettings(this);
         PlaybackEngine pe = new PlaybackEngine(this, device, settings);
+        // Set volume BEFORE play() so AudioEngine.currentVolumeLinear is non-zero
+        // when switchOutput()'s pushVolumeStateToOutput() runs — otherwise the
+        // USB DAC starts at silence on the first track.
+        pe.setVolume(initialVolume);
         pe.setListener(new PlaybackEngine.Listener() {
             @Override public void onPrepared() {
                 if (listener != null) mainHandler.post(listener::onPrepared);
@@ -315,6 +333,12 @@ public class RecorderService extends Service {
         controlHandler.post(pe::applyEqFromSettings);
     }
 
+    public void setPlaybackVolume(float linear01) {
+        PlaybackEngine pe = playbackEngine;
+        if (pe == null) return;
+        controlHandler.post(() -> pe.setVolume(linear01));
+    }
+
     @Nullable
     public PlaybackEngine getPlaybackEngine() {
         return playbackEngine;
@@ -356,7 +380,15 @@ public class RecorderService extends Service {
     private void doStart(int rate, int channels, int bits, boolean monitor,
                          float monitorVolume) {
         try {
-            engine = new RecordingEngine(this, device, new WavSink(device.getInput()));
+            UsbAudioDevice d = device;
+            if (d == null || !d.isValid()) {
+                Log.w(TAG, "doStart: device became invalid between schedule and run");
+                stopForegroundSafely();
+                transition(State.ERROR, "USB device disconnected");
+                transition(State.IDLE, null);
+                return;
+            }
+            engine = new RecordingEngine(this, d, new WavSink(d.getInput()));
             if (!engine.start(rate, channels, bits, monitor, monitorVolume)) {
                 engine = null;
                 stopForegroundSafely();
@@ -378,11 +410,20 @@ public class RecorderService extends Service {
         mainHandler.post(() -> tickHandler.removeCallbacks(tickRunnable));
         RecordingEngine e = engine;
         engine = null;
+        long capturedFrames = 0;
         if (e != null) {
             try { e.stop(); } catch (Throwable t) { Log.w(TAG, "engine.stop threw", t); }
             lastRecordingUri = e.getOutputUri();
+            capturedFrames = e.getCapturedFrames();
         }
         stopForegroundSafely();
+        // Empty capture: surface the error toast (via ERROR), then immediately
+        // restore DEVICE_READY/IDLE so the UI is usable for a retry. The two
+        // notifications fire in order on the main thread, so the toast persists
+        // while applyState rebuilds the recording UI.
+        if (capturedFrames <= 0 && e != null) {
+            transition(State.ERROR, "No audio captured — device did not produce data");
+        }
         if (device != null && device.isValid()) {
             transition(State.DEVICE_READY, null);
         } else {
