@@ -25,8 +25,10 @@ import androidx.core.app.NotificationCompat;
 
 import com.example.audio_recorder.MainActivity;
 import com.example.audio_recorder.R;
+import com.example.audio_recorder.engine.PlaybackEngine;
 import com.example.audio_recorder.engine.RecordingEngine;
 import com.example.audio_recorder.engine.WavSink;
+import com.example.audio_recorder.settings.AppSettings;
 import com.nerio.audioengine.UsbAudioDevice;
 
 import java.util.ArrayList;
@@ -39,7 +41,7 @@ public class RecorderService extends Service {
     private static final int NOTIFICATION_ID = 1;
     private static final String ACTION_STOP = "com.example.audio_recorder.action.STOP_RECORDING";
 
-    public enum State { IDLE, DEVICE_READY, RECORDING, ERROR }
+    public enum State { IDLE, DEVICE_READY, RECORDING, PLAYING, ERROR }
 
     public interface StateListener {
         void onState(State state, @Nullable String error);
@@ -56,6 +58,8 @@ public class RecorderService extends Service {
     private UsbDeviceConnection deviceConnection;
     private UsbDevice usbDevice;
     private RecordingEngine engine;
+    private PlaybackEngine playbackEngine;
+    private Uri currentPlaybackUri;
 
     private HandlerThread controlThread;
     private Handler controlHandler;
@@ -104,6 +108,9 @@ public class RecorderService extends Service {
         if (state == State.RECORDING) {
             stopRecordingInternal();
         }
+        if (state == State.PLAYING) {
+            stopPlaybackInternal();
+        }
         detachDevice();
         if (controlThread != null) {
             controlThread.quitSafely();
@@ -133,6 +140,11 @@ public class RecorderService extends Service {
         return device;
     }
 
+    @Nullable
+    public RecordingEngine getEngine() {
+        return engine;
+    }
+
     public void registerListener(StateListener l) {
         if (l != null && !listeners.contains(l)) listeners.add(l);
     }
@@ -145,6 +157,10 @@ public class RecorderService extends Service {
         if (state == State.RECORDING) {
             Log.w(TAG, "attachDevice called while recording; ignoring");
             return;
+        }
+        if (state == State.PLAYING) {
+            Log.w(TAG, "attachDevice called while playing; stopping playback first");
+            stopPlaybackInternal();
         }
         detachDevice();
         if (conn == null) {
@@ -174,6 +190,9 @@ public class RecorderService extends Service {
     public void detachDevice() {
         if (state == State.RECORDING) {
             stopRecordingInternal();
+        }
+        if (state == State.PLAYING) {
+            stopPlaybackInternal();
         }
         if (device != null) {
             try { device.close(); } catch (Throwable t) { Log.w(TAG, "device.close threw", t); }
@@ -209,6 +228,129 @@ public class RecorderService extends Service {
         RecordingEngine e = engine;
         if (e == null) return;
         controlHandler.post(() -> e.setMonitorVolume(linear01));
+    }
+
+    // --- Playback ---
+
+    public boolean startPlayback(Uri uri, PlaybackEngine.Listener listener) {
+        if (uri == null) return false;
+        if (state == State.RECORDING) {
+            Log.w(TAG, "startPlayback ignored: currently recording");
+            return false;
+        }
+        if (state == State.PLAYING) {
+            // Replace the active source with the new one.
+            stopPlaybackInternal();
+        }
+        currentPlaybackUri = uri;
+        AppSettings settings = new AppSettings(this);
+        PlaybackEngine pe = new PlaybackEngine(this, device, settings);
+        pe.setListener(new PlaybackEngine.Listener() {
+            @Override public void onPrepared() {
+                if (listener != null) mainHandler.post(listener::onPrepared);
+            }
+            @Override public void onCompletion() {
+                if (listener != null) mainHandler.post(listener::onCompletion);
+                controlHandler.post(() -> {
+                    if (state == State.PLAYING) stopPlaybackInternal();
+                });
+            }
+            @Override public void onError(String message) {
+                if (listener != null) {
+                    mainHandler.post(() -> listener.onError(message));
+                }
+                controlHandler.post(() -> {
+                    if (state == State.PLAYING) stopPlaybackInternal();
+                });
+            }
+        });
+        playbackEngine = pe;
+        controlHandler.post(() -> {
+            try {
+                pe.play(uri);
+                transition(State.PLAYING, null);
+            } catch (Throwable t) {
+                Log.e(TAG, "playback start failed", t);
+                playbackEngine = null;
+                currentPlaybackUri = null;
+                transition(device != null && device.isValid()
+                        ? State.DEVICE_READY : State.IDLE, null);
+            }
+        });
+        return true;
+    }
+
+    public void pausePlayback() {
+        PlaybackEngine pe = playbackEngine;
+        if (pe == null) return;
+        controlHandler.post(pe::pause);
+    }
+
+    public void resumePlayback() {
+        PlaybackEngine pe = playbackEngine;
+        if (pe == null) return;
+        controlHandler.post(pe::resume);
+    }
+
+    public void togglePlaybackPlayPause() {
+        PlaybackEngine pe = playbackEngine;
+        if (pe == null) return;
+        controlHandler.post(pe::togglePlayPause);
+    }
+
+    public void seekPlayback(int positionMs) {
+        PlaybackEngine pe = playbackEngine;
+        if (pe == null) return;
+        controlHandler.post(() -> pe.seekTo(positionMs));
+    }
+
+    public void stopPlayback() {
+        if (state != State.PLAYING) return;
+        controlHandler.post(this::stopPlaybackInternal);
+    }
+
+    public void reloadPlaybackEq() {
+        PlaybackEngine pe = playbackEngine;
+        if (pe == null) return;
+        controlHandler.post(pe::applyEqFromSettings);
+    }
+
+    @Nullable
+    public PlaybackEngine getPlaybackEngine() {
+        return playbackEngine;
+    }
+
+    @Nullable
+    public Uri getCurrentPlaybackUri() {
+        return currentPlaybackUri;
+    }
+
+    public boolean isPlaybackPlaying() {
+        PlaybackEngine pe = playbackEngine;
+        return pe != null && pe.isPlaying();
+    }
+
+    public int getPlaybackPositionMs() {
+        PlaybackEngine pe = playbackEngine;
+        return pe != null ? pe.getCurrentPositionMs() : 0;
+    }
+
+    public int getPlaybackDurationMs() {
+        PlaybackEngine pe = playbackEngine;
+        return pe != null ? pe.getDurationMs() : 0;
+    }
+
+    private void stopPlaybackInternal() {
+        PlaybackEngine pe = playbackEngine;
+        playbackEngine = null;
+        currentPlaybackUri = null;
+        if (pe != null) {
+            try { pe.stop(); } catch (Throwable t) { Log.w(TAG, "playback.stop threw", t); }
+        }
+        if (state == State.PLAYING) {
+            transition(device != null && device.isValid()
+                    ? State.DEVICE_READY : State.IDLE, null);
+        }
     }
 
     private void doStart(int rate, int channels, int bits, boolean monitor,

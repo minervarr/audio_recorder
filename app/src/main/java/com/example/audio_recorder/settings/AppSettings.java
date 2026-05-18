@@ -10,6 +10,13 @@ public class AppSettings {
     private static final String KEY_MONITOR_VIA_OUTPUT = "monitor_via_output";
     private static final String KEY_LAST_DEVICE_KEY = "last_device_key";
 
+    // EQ keys mirror Matrix Player's namespace so the two apps could share
+    // a preferences file if they were ever co-located.
+    private static final String KEY_EQ_ENABLED = "eq_enabled";
+    private static final String KEY_EQ_PROFILE_NAME = "eq_profile_name";
+    private static final String KEY_EQ_PROFILE_SOURCE = "eq_profile_source";
+    private static final String KEY_EQ_PROFILE_FORM = "eq_profile_form";
+
     private final SharedPreferences prefs;
 
     public AppSettings(Context context) {
@@ -70,5 +77,33 @@ public class AppSettings {
 
     public void setLastDeviceKey(String key) {
         prefs.edit().putString(KEY_LAST_DEVICE_KEY, key).apply();
+    }
+
+    public boolean isEqEnabled() {
+        return prefs.getBoolean(KEY_EQ_ENABLED, false);
+    }
+
+    public void setEqEnabled(boolean enabled) {
+        prefs.edit().putBoolean(KEY_EQ_ENABLED, enabled).apply();
+    }
+
+    public String getEqProfileName() {
+        return prefs.getString(KEY_EQ_PROFILE_NAME, "");
+    }
+
+    public String getEqProfileSource() {
+        return prefs.getString(KEY_EQ_PROFILE_SOURCE, "");
+    }
+
+    public String getEqProfileForm() {
+        return prefs.getString(KEY_EQ_PROFILE_FORM, "");
+    }
+
+    public void setEqProfile(String name, String source, String form) {
+        prefs.edit()
+                .putString(KEY_EQ_PROFILE_NAME, name != null ? name : "")
+                .putString(KEY_EQ_PROFILE_SOURCE, source != null ? source : "")
+                .putString(KEY_EQ_PROFILE_FORM, form != null ? form : "")
+                .apply();
     }
 }

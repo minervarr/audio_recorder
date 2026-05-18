@@ -38,6 +38,12 @@ public class RecordingEngine {
     private boolean monitoring;
     private long startMs;
 
+    // Negotiated format snapshot, populated in start() and exposed to the UI
+    // for the on-screen diagnostic + monitor-mismatch handling.
+    private volatile int inRate, inCh, inBits, inSubslot;
+    private volatile int outRate, outCh, outBits, outSubslot;
+    private volatile boolean monitorMismatch;
+
     public RecordingEngine(Context context, UsbAudioDevice device, EncodingSink sink) {
         this.context = context.getApplicationContext();
         this.device = device;
@@ -66,33 +72,58 @@ public class RecordingEngine {
         int actualRate = input.getConfiguredRate();
         int actualChannels = input.getConfiguredChannels();
         int actualBits = input.getConfiguredBitDepth();
+        inRate = actualRate;
+        inCh = actualChannels;
+        inBits = actualBits;
+        inSubslot = input.getConfiguredSubslotSize();
+        outRate = outCh = outBits = outSubslot = 0;
+        monitorMismatch = false;
         if (monitor) {
             UsbAudioOutput output = device.getOutput();
             int encoding = bitsToEncoding(actualBits);
-            if (!output.configure(actualRate, actualChannels, encoding, actualBits)
+            // Asymmetric dongles (mic 1ch / headphones 2ch is the common case)
+            // need a monitor output configured at *its* native channel count,
+            // not the input's — otherwise output.configure fails or the C++
+            // relax-match silently picks a wrong alt-setting. The record loop
+            // will upmix mono → stereo on the way to the monitor.
+            int monitorChannels = pickMonitorChannelCount(output, actualChannels);
+            if (monitorChannels <= 0) {
+                Log.w(TAG, "monitor output has no channel count >= input ("
+                        + actualChannels + "ch); disabling monitor");
+                monitoring = false;
+            } else if (!output.configure(actualRate, monitorChannels, encoding, actualBits)
                     || !output.start()) {
                 Log.w(TAG, "monitor output failed; recording without monitor");
                 monitoring = false;
             } else {
-                int outRate = output.getConfiguredRate();
-                int outChannels = output.getConfiguredChannels();
-                int outBits = output.getConfiguredBitDepth();
-                int outSubslot = output.getConfiguredSubslotSize();
-                int inSubslot = input.getConfiguredSubslotSize();
+                outRate = output.getConfiguredRate();
+                outCh = output.getConfiguredChannels();
+                outBits = output.getConfiguredBitDepth();
+                outSubslot = output.getConfiguredSubslotSize();
                 Log.i(TAG, "monitor formats: input="
                         + actualRate + "Hz/" + actualBits + "b/"
                         + actualChannels + "ch subslot=" + inSubslot
                         + " output="
                         + outRate + "Hz/" + outBits + "b/"
-                        + outChannels + "ch subslot=" + outSubslot);
-                if (outRate != actualRate || outChannels != actualChannels) {
-                    Log.w(TAG, "monitor rate/channels mismatch — expect audio artifacts");
+                        + outCh + "ch subslot=" + outSubslot
+                        + (outCh > actualChannels ? " (upmix " + actualChannels
+                                + "→" + outCh + ")" : ""));
+                // Rate mismatch is the only truly broken case — we can't
+                // resample. Channel asymmetry is handled by the record loop's
+                // upmix, and bit-depth/subslot asymmetry is handled by the C++
+                // writeIntXX downshift branch.
+                if (outRate != actualRate) {
+                    Log.w(TAG, "monitor rate mismatch — disabling monitor");
+                    monitorMismatch = true;
+                    try { output.stop(); } catch (Throwable ignored) {}
+                    monitoring = false;
+                } else {
+                    // UsbAudioOutput defaults currentVolumeLinear to 0f (silence).
+                    // Apply the user's chosen monitor volume before opening the tap.
+                    output.setVolume(monitorVolume);
+                    input.setMonitorOutput(output, outCh);
+                    monitoring = true;
                 }
-                // UsbAudioOutput defaults currentVolumeLinear to 0f (silence).
-                // Apply the user's chosen monitor volume before opening the tap.
-                output.setVolume(monitorVolume);
-                input.setMonitorOutput(output);
-                monitoring = true;
             }
         }
         String ts = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
@@ -163,6 +194,31 @@ public class RecordingEngine {
         return startMs;
     }
 
+    // Format introspection: surfaces the negotiated input/output formats for
+    // the on-screen diagnostic. Values are populated during start() and are 0
+    // outside an active recording session.
+    public int getInputRate()       { return inRate; }
+    public int getInputChannels()   { return inCh; }
+    public int getInputBits()       { return inBits; }
+    public int getInputSubslot()    { return inSubslot; }
+    public int getOutputRate()      { return outRate; }
+    public int getOutputChannels()  { return outCh; }
+    public int getOutputBits()      { return outBits; }
+    public int getOutputSubslot()   { return outSubslot; }
+
+    /** True iff monitor was requested but input/output couldn't agree on rate/channels. */
+    public boolean isMonitorMismatch() { return monitorMismatch; }
+
+    /** True iff monitor is requested AND output is actively receiving the tap. */
+    public boolean isMonitorActive() { return monitoring; }
+
+    /** Frame counter from the capture loop. Diagnostic for the Bug 1 empty-WAV case. */
+    public long getFramesWritten() {
+        if (device == null) return 0;
+        UsbAudioInput input = device.getInput();
+        return input != null ? input.getFramesWritten() : 0;
+    }
+
     private Uri promoteToMediaStore(File source) throws IOException {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             return promoteWithMediaStoreInsert(source);
@@ -217,6 +273,32 @@ public class RecordingEngine {
                 new String[]{sink.mimeType()},
                 (path, uri) -> resultUri[0] = uri);
         return Uri.fromFile(dest);
+    }
+
+    /**
+     * Choose a channel count for the monitor output that is ≥ {@code inputChannels}
+     * and supported by the device's output side. Returns:
+     * <ul>
+     *   <li>{@code inputChannels} if the output supports it directly (no upmix);</li>
+     *   <li>otherwise the smallest supported value strictly greater than
+     *       {@code inputChannels} (upmix path — record loop duplicates channel 0);</li>
+     *   <li>{@code 0} if the output supports no count ≥ {@code inputChannels} —
+     *       monitor stays off.</li>
+     * </ul>
+     */
+    private static int pickMonitorChannelCount(UsbAudioOutput output, int inputChannels) {
+        int[] supported = output != null ? output.getSupportedOutputChannelCounts() : null;
+        if (supported == null || supported.length == 0) {
+            // Engine doesn't know the output capabilities — try the input count
+            // and let configure() either succeed or fail.
+            return inputChannels;
+        }
+        int best = 0;
+        for (int c : supported) {
+            if (c == inputChannels) return c;
+            if (c > inputChannels && (best == 0 || c < best)) best = c;
+        }
+        return best;
     }
 
     private static int bitsToEncoding(int bits) {

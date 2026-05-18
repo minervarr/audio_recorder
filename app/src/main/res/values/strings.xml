@@ -19,8 +19,15 @@
     <string name="record_stop">Stop</string>
     <string name="record_elapsed">● REC %1$s</string>
     <string name="monitor_label">Monitor via USB output</string>
+    <string name="monitor_no_common_format">Monitor disabled: device input and output share no common format</string>
+    <string name="monitor_format_adjusted">Format adjusted for monitor compatibility</string>
     <string name="volume_muted">muted</string>
     <string name="volume_db_fmt">%1$+.1f dB</string>
+    <string name="format_diagnostic_in_fmt">in  %1$dHz / %2$db / %3$dch  subslot=%4$d</string>
+    <string name="format_diagnostic_out_fmt">out %1$dHz / %2$db / %3$dch  subslot=%4$d</string>
+    <string name="format_diagnostic_out_off">out (monitor off)</string>
+    <string name="format_diagnostic_out_mismatch">out %1$dHz / %2$db / %3$dch  subslot=%4$d  [MISMATCH]</string>
+    <string name="format_diagnostic_frames">frames=%1$,d</string>
 
     <string name="request_permission_audio">Microphone access is required to record</string>
     <string name="request_permission_usb">USB permission is required to access the device</string>
@@ -37,4 +44,18 @@
     <string name="recording_notification_action_stop">Stop</string>
 
     <string name="error_prefix">Error: %1$s</string>
+
+    <string name="playback_play">Play</string>
+    <string name="playback_pause">Pause</string>
+    <string name="playback_time_fmt">%1$d:%2$02d</string>
+    <string name="playback_eq_label">EQ</string>
+    <string name="playback_eq_off">Off</string>
+    <string name="playback_eq_pick">Pick EQ profile</string>
+    <string name="playback_eq_clear">No EQ (flat)</string>
+    <string name="playback_eq_no_profiles">No EQ profiles found</string>
+    <string name="playback_via_dac">USB DAC · bit-perfect</string>
+    <string name="playback_via_dac_mismatch">USB DAC · %1$d→%2$d-bit</string>
+    <string name="playback_via_speaker">Phone speaker</string>
+    <string name="playback_error_fmt">Playback error: %1$s</string>
+    <string name="playback_open_failed">Could not open recording</string>
 </resources>
