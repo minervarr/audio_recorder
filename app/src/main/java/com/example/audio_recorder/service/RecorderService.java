@@ -29,6 +29,8 @@ import com.example.audio_recorder.engine.PlaybackEngine;
 import com.example.audio_recorder.engine.RecordingEngine;
 import com.example.audio_recorder.engine.WavSink;
 import com.example.audio_recorder.settings.AppSettings;
+import com.nerio.audioengine.AudioInput;
+import com.nerio.audioengine.AudioRecordInput;
 import com.nerio.audioengine.UsbAudioDevice;
 
 import java.util.ArrayList;
@@ -57,6 +59,8 @@ public class RecorderService extends Service {
     private volatile UsbAudioDevice device;
     private volatile UsbDeviceConnection deviceConnection;
     private volatile UsbDevice usbDevice;
+    // Built-in mic capture source, active only while no USB device is attached.
+    private volatile AudioRecordInput phoneMicInput;
     private volatile RecordingEngine engine;
     private PlaybackEngine playbackEngine;
     private Uri currentPlaybackUri;
@@ -112,6 +116,7 @@ public class RecorderService extends Service {
             stopPlaybackInternal();
         }
         detachDevice();
+        releasePhoneMic();
         if (controlThread != null) {
             controlThread.quitSafely();
             controlThread = null;
@@ -138,6 +143,36 @@ public class RecorderService extends Service {
 
     public UsbAudioDevice getDevice() {
         return device;
+    }
+
+    /** True when ready to record from the built-in mic (no USB device attached). */
+    public boolean isPhoneMic() {
+        return device == null && phoneMicInput != null;
+    }
+
+    @Nullable
+    public AudioRecordInput getPhoneMicInput() {
+        return phoneMicInput;
+    }
+
+    /**
+     * Falls back to the built-in microphone as the capture source when no USB
+     * device is attached. No-op while a USB device is present or while
+     * recording/playing. Idempotent.
+     */
+    public void attachPhoneMic() {
+        if (device != null || state == State.RECORDING || state == State.PLAYING) return;
+        if (phoneMicInput == null) {
+            AudioRecordInput mic = new AudioRecordInput(this);
+            if (!mic.isAvailable()) {
+                Log.i(TAG, "attachPhoneMic: no microphone on this device");
+                return;
+            }
+            phoneMicInput = mic;
+        }
+        if (state != State.DEVICE_READY) {
+            transition(State.DEVICE_READY, null);
+        }
     }
 
     @Nullable
@@ -181,10 +216,20 @@ public class RecorderService extends Service {
             transition(State.ERROR, "Device has no capture-capable formats");
             return;
         }
+        // USB takes precedence over the built-in mic fallback.
+        releasePhoneMic();
         this.usbDevice = usbDev;
         this.deviceConnection = conn;
         this.device = d;
         transition(State.DEVICE_READY, null);
+    }
+
+    private void releasePhoneMic() {
+        AudioRecordInput mic = phoneMicInput;
+        phoneMicInput = null;
+        if (mic != null) {
+            try { mic.release(); } catch (Throwable t) { Log.w(TAG, "mic.release threw", t); }
+        }
     }
 
     public void detachDevice() {
@@ -212,6 +257,11 @@ public class RecorderService extends Service {
                                float monitorVolume) {
         if (state != State.DEVICE_READY) {
             Log.w(TAG, "startRecording in state " + state);
+            return;
+        }
+        if (isPhoneMic()) {
+            startForegroundSafely();
+            controlHandler.post(() -> doStart(rate, channels, bits, false, monitorVolume));
             return;
         }
         UsbAudioDevice d = device;
@@ -291,7 +341,7 @@ public class RecorderService extends Service {
                 Log.e(TAG, "playback start failed", t);
                 playbackEngine = null;
                 currentPlaybackUri = null;
-                transition(device != null && device.isValid()
+                transition((device != null && device.isValid()) || phoneMicInput != null
                         ? State.DEVICE_READY : State.IDLE, null);
             }
         });
@@ -372,7 +422,7 @@ public class RecorderService extends Service {
             try { pe.stop(); } catch (Throwable t) { Log.w(TAG, "playback.stop threw", t); }
         }
         if (state == State.PLAYING) {
-            transition(device != null && device.isValid()
+            transition((device != null && device.isValid()) || phoneMicInput != null
                     ? State.DEVICE_READY : State.IDLE, null);
         }
     }
@@ -381,14 +431,25 @@ public class RecorderService extends Service {
                          float monitorVolume) {
         try {
             UsbAudioDevice d = device;
-            if (d == null || !d.isValid()) {
+            AudioRecordInput mic = phoneMicInput;
+            AudioInput in;
+            AppSettings settings = new AppSettings(this);
+            if (d != null && d.isValid()) {
+                // Buffering profile must land before configure()/start —
+                // the native side ignores changes mid-stream.
+                d.setLatencyProfile(settings.getLatencyProfile());
+                in = d.getInput();
+            } else if (d == null && mic != null) {
+                mic.setLatencyProfile(settings.getLatencyProfile());
+                in = mic;
+            } else {
                 Log.w(TAG, "doStart: device became invalid between schedule and run");
                 stopForegroundSafely();
                 transition(State.ERROR, "USB device disconnected");
                 transition(State.IDLE, null);
                 return;
             }
-            engine = new RecordingEngine(this, d, new WavSink(d.getInput()));
+            engine = new RecordingEngine(this, in, d, new WavSink(in));
             if (!engine.start(rate, channels, bits, monitor, monitorVolume)) {
                 engine = null;
                 stopForegroundSafely();
@@ -424,7 +485,7 @@ public class RecorderService extends Service {
         if (capturedFrames <= 0 && e != null) {
             transition(State.ERROR, "No audio captured — device did not produce data");
         }
-        if (device != null && device.isValid()) {
+        if ((device != null && device.isValid()) || phoneMicInput != null) {
             transition(State.DEVICE_READY, null);
         } else {
             transition(State.IDLE, null);

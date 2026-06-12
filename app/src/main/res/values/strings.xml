@@ -14,6 +14,15 @@
     <string name="format_bits">%1$d-bit</string>
     <string name="format_channels_value">%1$d ch</string>
     <string name="format_unavailable">Format unavailable on this device</string>
+    <string name="best_format_label">Best available format</string>
+    <string name="latency_label">Low-latency mode (smaller buffers)</string>
+
+    <string name="phone_mic_name">Built-in microphone</string>
+    <string name="phone_mic_unprocessed">Unprocessed source · no platform DSP</string>
+    <string name="phone_mic_processed">Voice-recognition source · platform DSP may apply</string>
+    <string name="format_diagnostic_path_usb">src USB · bit-perfect wire→WAV</string>
+    <string name="format_diagnostic_path_mic_unprocessed">src built-in mic · UNPROCESSED</string>
+    <string name="format_diagnostic_path_mic_processed">src built-in mic · processed</string>
 
     <string name="record_start">Record</string>
     <string name="record_stop">Stop</string>

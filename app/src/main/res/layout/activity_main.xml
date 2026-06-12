@@ -49,10 +49,21 @@
                 android:visibility="gone" />
         </LinearLayout>
 
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/best_format_switch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:enabled="false"
+            android:textColor="@color/text_primary"
+            android:thumbTint="@color/green_bright"
+            android:trackTint="@color/green_dim"
+            android:text="@string/best_format_label" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="8dp"
             android:orientation="horizontal">
 
             <com.google.android.material.button.MaterialButton
@@ -100,6 +111,16 @@
             android:thumbTint="@color/green_bright"
             android:trackTint="@color/green_dim"
             android:text="@string/monitor_label" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/latency_switch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textColor="@color/text_primary"
+            android:thumbTint="@color/green_bright"
+            android:trackTint="@color/green_dim"
+            android:text="@string/latency_label" />
 
         <LinearLayout
             android:id="@+id/monitor_volume_row"

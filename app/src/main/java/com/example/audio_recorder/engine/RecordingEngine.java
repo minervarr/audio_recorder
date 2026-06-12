@@ -12,6 +12,7 @@ import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.util.Log;
 
+import com.nerio.audioengine.AudioInput;
 import com.nerio.audioengine.UsbAudioDevice;
 import com.nerio.audioengine.UsbAudioInput;
 import com.nerio.audioengine.UsbAudioOutput;
@@ -31,6 +32,9 @@ public class RecordingEngine {
     private static final String TAG = "RecordingEngine";
 
     private final Context context;
+    private final AudioInput input;
+    // Null when recording from a non-USB source (built-in mic). Gates the
+    // monitor path and the stuck-ADC first-packet retry, both USB concepts.
     private final UsbAudioDevice device;
     private final EncodingSink sink;
 
@@ -47,8 +51,14 @@ public class RecordingEngine {
     private volatile boolean monitorMismatch;
 
     public RecordingEngine(Context context, UsbAudioDevice device, EncodingSink sink) {
+        this(context, device != null ? device.getInput() : null, device, sink);
+    }
+
+    public RecordingEngine(Context context, AudioInput input,
+                           UsbAudioDevice deviceOrNull, EncodingSink sink) {
         this.context = context.getApplicationContext();
-        this.device = device;
+        this.input = input;
+        this.device = deviceOrNull;
         this.sink = sink;
     }
 
@@ -62,13 +72,19 @@ public class RecordingEngine {
 
     public boolean start(int rate, int channels, int bits, boolean monitor, float monitorVolume)
             throws IOException {
-        if (device == null || !device.isValid()) {
-            Log.e(TAG, "start: invalid device");
+        if (input == null || (device != null && !device.isValid())) {
+            Log.e(TAG, "start: invalid input/device");
             return false;
         }
         lastSessionFrames = 0;
         if (!attemptStart(rate, channels, bits, monitor, monitorVolume)) {
             return false;
+        }
+        if (device == null) {
+            // Non-USB sources (AudioRecord) have no stuck-ADC failure mode;
+            // skip the first-packet wait/retry.
+            startMs = System.currentTimeMillis();
+            return true;
         }
         if (waitForFirstPacket(FIRST_PACKET_DEADLINE_MS)) {
             startMs = System.currentTimeMillis();
@@ -93,7 +109,6 @@ public class RecordingEngine {
 
     private boolean attemptStart(int rate, int channels, int bits, boolean monitor,
                                  float monitorVolume) throws IOException {
-        UsbAudioInput input = device.getInput();
         if (!input.configure(rate, channels, bits)) {
             Log.e(TAG, "input.configure(" + rate + ", " + channels + ", " + bits + ") failed");
             return false;
@@ -115,7 +130,9 @@ public class RecordingEngine {
         inSubslot = input.getConfiguredSubslotSize();
         outRate = outCh = outBits = outSubslot = 0;
         monitorMismatch = false;
-        if (monitor) {
+        // Monitoring routes through the USB output — not available for the
+        // built-in mic source.
+        if (monitor && device != null) {
             UsbAudioOutput output = device.getOutput();
             int encoding = bitsToEncoding(actualBits);
             // Asymmetric dongles (mic 1ch / headphones 2ch is the common case)
@@ -158,7 +175,7 @@ public class RecordingEngine {
                     // UsbAudioOutput defaults currentVolumeLinear to 0f (silence).
                     // Apply the user's chosen monitor volume before opening the tap.
                     output.setVolume(monitorVolume);
-                    input.setMonitorOutput(output, outCh);
+                    ((UsbAudioInput) input).setMonitorOutput(output, outCh);
                     monitoring = true;
                 }
             }
@@ -177,7 +194,6 @@ public class RecordingEngine {
     }
 
     private boolean waitForFirstPacket(long deadlineMs) {
-        UsbAudioInput input = device.getInput();
         if (input == null) return false;
         long deadline = SystemClock.elapsedRealtime() + deadlineMs;
         while (SystemClock.elapsedRealtime() < deadline) {
@@ -196,9 +212,8 @@ public class RecordingEngine {
     // except we don't promote the empty file to MediaStore and we don't clear
     // tempFile — startRecording() will truncate and rewrite it.
     private void teardownAttempt() {
-        UsbAudioInput input = device.getInput();
-        if (input != null && monitoring) {
-            try { input.setMonitorOutput(null); } catch (Throwable ignored) {}
+        if (monitoring) {
+            try { ((UsbAudioInput) input).setMonitorOutput(null); } catch (Throwable ignored) {}
         }
         try { sink.endRecording(); } catch (Throwable t) {
             Log.w(TAG, "teardownAttempt: sink.endRecording threw", t);
@@ -218,11 +233,10 @@ public class RecordingEngine {
 
     public void stop() {
         if (tempFile == null) return;
-        UsbAudioInput input = device.getInput();
         // Detach the monitor tap before draining the record loop so the drain
         // doesn't keep writing into an output we're about to stop.
         if (monitoring) {
-            try { input.setMonitorOutput(null); } catch (Throwable ignored) {}
+            try { ((UsbAudioInput) input).setMonitorOutput(null); } catch (Throwable ignored) {}
         }
         try {
             sink.endRecording();
@@ -309,8 +323,6 @@ public class RecordingEngine {
 
     /** Frame counter from the capture loop. Diagnostic for the Bug 1 empty-WAV case. */
     public long getFramesWritten() {
-        if (device == null) return 0;
-        UsbAudioInput input = device.getInput();
         return input != null ? input.getFramesWritten() : 0;
     }
 

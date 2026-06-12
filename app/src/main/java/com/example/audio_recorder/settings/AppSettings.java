@@ -3,12 +3,18 @@ package com.example.audio_recorder.settings;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import com.nerio.audioengine.LatencyProfile;
+
 public class AppSettings {
 
     private static final String PREFS_NAME = "audio_recorder_prefs";
 
     private static final String KEY_MONITOR_VIA_OUTPUT = "monitor_via_output";
     private static final String KEY_LAST_DEVICE_KEY = "last_device_key";
+    private static final String KEY_LATENCY_PROFILE = "latency_profile";
+
+    /** Pseudo device key for built-in-mic format persistence. */
+    public static final String PHONE_MIC_KEY = "phone-mic";
 
     // EQ keys mirror Matrix Player's namespace so the two apps could share
     // a preferences file if they were ever co-located.
@@ -50,6 +56,29 @@ public class AppSettings {
 
     public void setChannelCount(String dacKey, int channels) {
         prefs.edit().putInt("channels_" + dacKey, channels).apply();
+    }
+
+    /**
+     * "Best available format" mode: pick the device's max bit depth × rate
+     * automatically. Default on; a manual format pick switches it off.
+     */
+    public boolean isBestFormatMode(String dacKey) {
+        return prefs.getBoolean("format_best_" + dacKey, true);
+    }
+
+    public void setBestFormatMode(String dacKey, boolean best) {
+        prefs.edit().putBoolean("format_best_" + dacKey, best).apply();
+    }
+
+    /** Buffering profile for the engine. STABLE (default) = dropout-proof recording. */
+    public LatencyProfile getLatencyProfile() {
+        return "low".equals(prefs.getString(KEY_LATENCY_PROFILE, "stable"))
+                ? LatencyProfile.LOW_LATENCY : LatencyProfile.STABLE;
+    }
+
+    public void setLatencyProfile(LatencyProfile profile) {
+        prefs.edit().putString(KEY_LATENCY_PROFILE,
+                profile == LatencyProfile.LOW_LATENCY ? "low" : "stable").apply();
     }
 
     public boolean isMonitorViaOutput() {

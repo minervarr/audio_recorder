@@ -1,15 +1,15 @@
 package com.example.audio_recorder.engine;
 
-import com.nerio.audioengine.UsbAudioInput;
+import com.nerio.audioengine.AudioInput;
 
 import java.io.File;
 import java.io.IOException;
 
 public class WavSink implements EncodingSink {
 
-    private final UsbAudioInput input;
+    private final AudioInput input;
 
-    public WavSink(UsbAudioInput input) {
+    public WavSink(AudioInput input) {
         this.input = input;
     }
 

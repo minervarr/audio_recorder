@@ -43,6 +43,11 @@ import com.example.audio_recorder.settings.AppSettings;
 import com.example.audio_recorder.ui.PlaybackSheet;
 import com.example.audio_recorder.usb.UsbAudioManager;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.nerio.audioengine.AudioInput;
+import com.nerio.audioengine.AudioRecordInput;
+import com.nerio.audioengine.DeviceFormat;
+import com.nerio.audioengine.FormatSelector;
+import com.nerio.audioengine.LatencyProfile;
 import com.nerio.audioengine.UsbAudioDevice;
 import com.nerio.audioengine.UsbAudioInput;
 import com.nerio.audioengine.UsbAudioOutput;
@@ -77,6 +82,9 @@ public class MainActivity extends AppCompatActivity {
     private boolean monitorOn;
     private float monitorVolume = 0.5f;
     private boolean deviceAttached;
+    // True when the active capture source is the built-in mic (no USB device).
+    private boolean phoneMicMode;
+    private boolean bestFormatMode = true;
 
     // Monitor slider dB taper: slider 0 = mute, 1..1000 maps linearly in dB to
     // [MIN, MAX]. We then invert UsbAudioOutput's cube-root SW curve so the
@@ -99,6 +107,8 @@ public class MainActivity extends AppCompatActivity {
             UsbDevice already = usbAudioManager.getConnectedDevice();
             if (already != null && service.getDevice() == null) {
                 handleFoundAtStartup(already);
+            } else if (already == null && service.getDevice() == null) {
+                service.attachPhoneMic();
             }
         }
         @Override public void onServiceDisconnected(ComponentName name) {
@@ -120,8 +130,12 @@ public class MainActivity extends AppCompatActivity {
             handleFoundAtStartup(device);
         }
         @Override public void onUsbDacDisconnected() {
-            if (service != null) service.detachDevice();
-            renderNoDevice();
+            if (service != null) {
+                service.detachDevice();
+                service.attachPhoneMic();
+            } else {
+                renderNoDevice();
+            }
         }
         @Override public void onUsbPermissionGranted(UsbDevice device) {
             clearTapToGrant();
@@ -168,6 +182,20 @@ public class MainActivity extends AppCompatActivity {
         monitorOn = settings.isMonitorViaOutput();
         binding.monitorSwitch.setChecked(monitorOn);
         applyMonitorRowVisibility();
+
+        binding.bestFormatSwitch.setOnCheckedChangeListener((b, isChecked) -> {
+            if (!b.isPressed()) return; // ignore programmatic setChecked
+            bestFormatMode = isChecked;
+            settings.setBestFormatMode(activeDacKey(), isChecked);
+            if (isChecked) applyBestFormat();
+            applyFormatButtonsEnabled();
+        });
+
+        binding.latencySwitch.setChecked(
+                settings.getLatencyProfile() == LatencyProfile.LOW_LATENCY);
+        binding.latencySwitch.setOnCheckedChangeListener((b, isChecked) ->
+                settings.setLatencyProfile(isChecked
+                        ? LatencyProfile.LOW_LATENCY : LatencyProfile.STABLE));
 
         binding.monitorVolumeSeekbar.setOnSeekBarChangeListener(
                 new SeekBar.OnSeekBarChangeListener() {
@@ -292,12 +320,16 @@ public class MainActivity extends AppCompatActivity {
     private void renderNoDevice() {
         binding.deviceName.setText(R.string.no_device);
         binding.deviceFormatSummary.setText("");
+        binding.deviceFormatSummary.setTextColor(
+                ContextCompat.getColor(this, R.color.text_secondary));
         clearTapToGrant();
         binding.sampleRateButton.setEnabled(false);
         binding.bitDepthButton.setEnabled(false);
         binding.channelsButton.setEnabled(false);
+        binding.bestFormatSwitch.setEnabled(false);
         binding.recordButton.setEnabled(false);
         deviceAttached = false;
+        phoneMicMode = false;
         applyMonitorRowVisibility();
         binding.formatDiagnosticText.setVisibility(View.GONE);
     }
@@ -320,21 +352,26 @@ public class MainActivity extends AppCompatActivity {
                 renderNoDevice();
                 binding.elapsedText.setText("");
                 binding.recordButton.setText(R.string.record_start);
+                // No USB device: fall back to the built-in mic (no-op if
+                // unavailable; transitions to DEVICE_READY if it works).
+                if (service != null) service.attachPhoneMic();
                 break;
             case DEVICE_READY:
                 onDeviceReady();
                 binding.elapsedText.setText("");
                 binding.recordButton.setText(R.string.record_start);
                 binding.recordButton.setEnabled(true);
-                binding.monitorSwitch.setEnabled(true);
-                binding.sampleRateButton.setEnabled(true);
-                binding.bitDepthButton.setEnabled(true);
-                binding.channelsButton.setEnabled(true);
+                binding.monitorSwitch.setEnabled(!phoneMicMode);
+                binding.bestFormatSwitch.setEnabled(true);
+                binding.latencySwitch.setEnabled(true);
+                applyFormatButtonsEnabled();
                 break;
             case RECORDING:
                 binding.recordButton.setText(R.string.record_stop);
                 binding.recordButton.setEnabled(true);
                 binding.monitorSwitch.setEnabled(false);
+                binding.bestFormatSwitch.setEnabled(false);
+                binding.latencySwitch.setEnabled(false);
                 binding.sampleRateButton.setEnabled(false);
                 binding.bitDepthButton.setEnabled(false);
                 binding.channelsButton.setEnabled(false);
@@ -346,6 +383,7 @@ public class MainActivity extends AppCompatActivity {
                                 err == null ? "unknown" : err),
                         Toast.LENGTH_LONG).show();
                 renderNoDevice();
+                if (service != null) service.attachPhoneMic();
                 break;
         }
     }
@@ -391,7 +429,18 @@ public class MainActivity extends AppCompatActivity {
             out = getString(R.string.format_diagnostic_out_off);
         }
         String frames = getString(R.string.format_diagnostic_frames, eng.getFramesWritten());
-        binding.formatDiagnosticText.setText(in + "\n" + out + "\n" + frames);
+        String src;
+        if (phoneMicMode) {
+            AudioRecordInput mic = service != null ? service.getPhoneMicInput() : null;
+            src = getString(mic != null && mic.isUnprocessed()
+                    ? R.string.format_diagnostic_path_mic_unprocessed
+                    : R.string.format_diagnostic_path_mic_processed);
+        } else {
+            // USB capture is lossless end-to-end: wire bytes land in the WAV
+            // with only the UAC subslot padding stripped.
+            src = getString(R.string.format_diagnostic_path_usb);
+        }
+        binding.formatDiagnosticText.setText(src + "\n" + in + "\n" + out + "\n" + frames);
         binding.formatDiagnosticText.setVisibility(View.VISIBLE);
     }
 
@@ -401,11 +450,18 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onDeviceReady() {
+        if (service != null && service.isPhoneMic()) {
+            onPhoneMicReady();
+            return;
+        }
         UsbAudioDevice device = (service != null) ? service.getDevice() : null;
         if (device == null) {
             renderNoDevice();
             return;
         }
+        phoneMicMode = false;
+        binding.deviceFormatSummary.setTextColor(
+                ContextCompat.getColor(this, R.color.text_secondary));
         UsbAudioOutput output = device.getOutput();
         UsbAudioInput input = device.getInput();
         int uacVersion = output.getUacVersion();
@@ -450,7 +506,9 @@ public class MainActivity extends AppCompatActivity {
         UsbDevice usb = usbAudioManager.getConnectedDevice();
         if (usb != null) {
             String dacKey = AppSettings.dacKey(usb.getVendorId(), usb.getProductId());
-            // Pick the saved format clamped against what's *effective* now
+            bestFormatMode = settings.isBestFormatMode(dacKey);
+            binding.bestFormatSwitch.setChecked(bestFormatMode);
+            // Pick the format clamped against what's *effective* now
             // (capture-only when monitor is off, intersection when monitor is
             // on). We do NOT call input.configure() here — a second configure()
             // on the service control thread at record time was leaving the IN
@@ -460,14 +518,18 @@ public class MainActivity extends AppCompatActivity {
             int effMaxRate = effRates.length > 0 ? effRates[effRates.length - 1] : 48000;
             int effMaxCh = 1;
             for (int c : effChannels) if (c > effMaxCh) effMaxCh = c;
-            selectedRate = clampToSupported(
-                    settings.getSampleRate(dacKey, Math.min(48000, effMaxRate)),
-                    effRates, Math.min(48000, effMaxRate));
-            selectedBits = clampToSupported(
-                    settings.getBitDepth(dacKey, 24), effBits, 24);
-            selectedChannels = clampToSupported(
-                    settings.getChannelCount(dacKey, Math.min(2, effMaxCh)),
-                    effChannels, Math.min(2, effMaxCh));
+            if (bestFormatMode) {
+                applyBestFormatUsb(device, effRates, effChannels, effBits);
+            } else {
+                selectedRate = clampToSupported(
+                        settings.getSampleRate(dacKey, Math.min(48000, effMaxRate)),
+                        effRates, Math.min(48000, effMaxRate));
+                selectedBits = clampToSupported(
+                        settings.getBitDepth(dacKey, 24), effBits, 24);
+                selectedChannels = clampToSupported(
+                        settings.getChannelCount(dacKey, Math.min(2, effMaxCh)),
+                        effChannels, Math.min(2, effMaxCh));
+            }
             settings.setLastDeviceKey(dacKey);
             // Now that we know which DAC we're on, load its persisted monitor
             // volume and reflect it in the slider. Pre-attach the slider
@@ -482,12 +544,129 @@ public class MainActivity extends AppCompatActivity {
         renderFormatButtons();
     }
 
+    /**
+     * Built-in mic as the capture source: same ready UI as a USB device, but
+     * the monitor path is unavailable and the format axes come from
+     * {@link AudioRecordInput}'s probes. The summary line shows whether the
+     * UNPROCESSED source is in play (green) or platform DSP may color the
+     * signal (amber).
+     */
+    private void onPhoneMicReady() {
+        AudioRecordInput mic = service.getPhoneMicInput();
+        if (mic == null) {
+            renderNoDevice();
+            return;
+        }
+        phoneMicMode = true;
+        deviceAttached = false;
+        clearTapToGrant();
+        binding.deviceName.setText(R.string.phone_mic_name);
+        binding.deviceFormatSummary.setText(mic.isUnprocessed()
+                ? R.string.phone_mic_unprocessed : R.string.phone_mic_processed);
+        binding.deviceFormatSummary.setTextColor(ContextCompat.getColor(this,
+                mic.isUnprocessed() ? R.color.green_primary : R.color.amber_conversion));
+        applyMonitorRowVisibility();
+
+        bestFormatMode = settings.isBestFormatMode(AppSettings.PHONE_MIC_KEY);
+        binding.bestFormatSwitch.setChecked(bestFormatMode);
+        if (bestFormatMode) {
+            applyBestFormatMic(mic);
+        } else {
+            selectedRate = clampToSupported(
+                    settings.getSampleRate(AppSettings.PHONE_MIC_KEY, 48000),
+                    mic.getSupportedRates(), 48000);
+            selectedBits = clampToSupported(
+                    settings.getBitDepth(AppSettings.PHONE_MIC_KEY, 32),
+                    mic.getSupportedBitDepths(), 32);
+            selectedChannels = clampToSupported(
+                    settings.getChannelCount(AppSettings.PHONE_MIC_KEY, 2),
+                    mic.getSupportedChannelCounts(), 2);
+        }
+        settings.setLastDeviceKey(AppSettings.PHONE_MIC_KEY);
+        renderFormatButtons();
+    }
+
+    /** Highest bit depth × rate the USB device offers, clamped to the effective axes. */
+    private void applyBestFormatUsb(UsbAudioDevice device,
+                                    int[] effRates, int[] effChannels, int[] effBits) {
+        DeviceFormat best = FormatSelector.bestCaptureFormat(device, 2);
+        if (best == null) return;
+        selectedRate = clampPreferHighest(best.rate, effRates, selectedRate);
+        selectedBits = clampPreferHighest(best.bits, effBits, selectedBits);
+        selectedChannels = clampToSupported(best.channels, effChannels, selectedChannels);
+    }
+
+    /** Max rate, float encoding, stereo — the best the phone pipeline offers. */
+    private void applyBestFormatMic(AudioRecordInput mic) {
+        int[] rates = mic.getSupportedRates();
+        int maxRate = 48000;
+        for (int r : rates) if (r > maxRate) maxRate = r;
+        selectedRate = maxRate;
+        selectedBits = 32;       // ENCODING_PCM_FLOAT
+        selectedChannels = 2;
+    }
+
+    /** Re-applies the best format for whichever source is active. */
+    private void applyBestFormat() {
+        if (phoneMicMode) {
+            AudioRecordInput mic = service != null ? service.getPhoneMicInput() : null;
+            if (mic != null) applyBestFormatMic(mic);
+        } else {
+            UsbAudioDevice device = service != null ? service.getDevice() : null;
+            if (device != null) {
+                applyBestFormatUsb(device,
+                        effectiveRates(device.getInput(), device.getOutput()),
+                        effectiveChannels(device.getInput(), device.getOutput()),
+                        effectiveBitDepths(device.getInput(), device.getOutput()));
+            }
+        }
+        renderFormatButtons();
+    }
+
+    private void applyFormatButtonsEnabled() {
+        boolean enabled = (deviceAttached || phoneMicMode) && !bestFormatMode;
+        binding.sampleRateButton.setEnabled(enabled);
+        binding.bitDepthButton.setEnabled(enabled);
+        binding.channelsButton.setEnabled(enabled);
+    }
+
+    /** The capture source the next recording will use, regardless of kind. */
+    @Nullable
+    private AudioInput activeInput() {
+        if (service == null) return null;
+        if (service.isPhoneMic()) return service.getPhoneMicInput();
+        UsbAudioDevice d = service.getDevice();
+        return d != null ? d.getInput() : null;
+    }
+
+    /** Settings key for the active source: vid:pid for USB, "phone-mic" otherwise. */
+    private String activeDacKey() {
+        if (!phoneMicMode) {
+            UsbDevice usb = usbAudioManager.getConnectedDevice();
+            if (usb != null) {
+                return AppSettings.dacKey(usb.getVendorId(), usb.getProductId());
+            }
+        }
+        return AppSettings.PHONE_MIC_KEY;
+    }
+
     private static int clampToSupported(int desired, int[] supported, int fallback) {
         if (supported != null) {
             for (int v : supported) if (v == desired) return desired;
             if (supported.length > 0) return supported[0];
         }
         return fallback;
+    }
+
+    /** Like clampToSupported but lands on the highest supported value instead of the lowest. */
+    private static int clampPreferHighest(int desired, int[] supported, int fallback) {
+        if (supported == null || supported.length == 0) return fallback;
+        int max = supported[0];
+        for (int v : supported) {
+            if (v == desired) return desired;
+            if (v > max) max = v;
+        }
+        return max;
     }
 
     private void persistMonitorVolume() {
@@ -608,7 +787,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private int[] effectiveRates(UsbAudioInput input, UsbAudioOutput output) {
+    private int[] effectiveRates(AudioInput input, UsbAudioOutput output) {
         // Rate is the one axis that strictly must intersect — resampling
         // isn't supported on the monitor path.
         int[] cap = captureRates(input);
@@ -618,14 +797,14 @@ public class MainActivity extends AppCompatActivity {
         return intersect(cap, out);
     }
 
-    private int[] effectiveBitDepths(UsbAudioInput input, UsbAudioOutput output) {
+    private int[] effectiveBitDepths(AudioInput input, UsbAudioOutput output) {
         // The C++ writeIntXX path handles both bit-depth up-cast (subslot
         // wider than source) and down-cast (subslot narrower; LSBs dropped).
         // So we let the user pick any input bit depth even when monitor is on.
         return captureBitDepths(input);
     }
 
-    private int[] effectiveChannels(UsbAudioInput input, UsbAudioOutput output) {
+    private int[] effectiveChannels(AudioInput input, UsbAudioOutput output) {
         // The record loop upmixes from N channels to M ≥ N by duplicating
         // channel 0 into the trailing slots. So we accept any input channel
         // count that is ≤ the output's largest supported value (typically 2
@@ -656,17 +835,17 @@ public class MainActivity extends AppCompatActivity {
         return out;
     }
 
-    private static int[] captureRates(UsbAudioInput input) {
+    private static int[] captureRates(AudioInput input) {
         int[] r = input.getSupportedRates();
         return (r != null && r.length > 0) ? r : FALLBACK_RATES;
     }
 
-    private static int[] captureBitDepths(UsbAudioInput input) {
+    private static int[] captureBitDepths(AudioInput input) {
         int[] b = input.getSupportedBitDepths();
         return (b != null && b.length > 0) ? b : FALLBACK_BIT_DEPTHS;
     }
 
-    private static int[] captureChannels(UsbAudioInput input) {
+    private static int[] captureChannels(AudioInput input) {
         int[] c = input.getSupportedChannelCounts();
         return (c != null && c.length > 0) ? c : FALLBACK_CHANNEL_COUNTS;
     }
@@ -680,10 +859,18 @@ public class MainActivity extends AppCompatActivity {
                 getString(R.string.format_channels_value, selectedChannels));
     }
 
+    /** USB output for monitor-intersection math, or null for the built-in mic. */
+    @Nullable
+    private UsbAudioOutput activeOutputOrNull() {
+        if (phoneMicMode || service == null) return null;
+        UsbAudioDevice d = service.getDevice();
+        return d != null ? d.getOutput() : null;
+    }
+
     private void pickSampleRate() {
-        UsbAudioDevice device = (service != null) ? service.getDevice() : null;
-        if (device == null) return;
-        int[] rates = effectiveRates(device.getInput(), device.getOutput());
+        AudioInput input = activeInput();
+        if (input == null) return;
+        int[] rates = effectiveRates(input, activeOutputOrNull());
         String[] labels = new String[rates.length];
         int currentIdx = 0;
         for (int i = 0; i < rates.length; i++) {
@@ -709,9 +896,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void pickBitDepth() {
-        UsbAudioDevice device = (service != null) ? service.getDevice() : null;
-        if (device == null) return;
-        int[] depths = effectiveBitDepths(device.getInput(), device.getOutput());
+        AudioInput input = activeInput();
+        if (input == null) return;
+        int[] depths = effectiveBitDepths(input, activeOutputOrNull());
         String[] labels = new String[depths.length];
         int currentIdx = 0;
         for (int i = 0; i < depths.length; i++) {
@@ -735,9 +922,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void pickChannels() {
-        UsbAudioDevice device = (service != null) ? service.getDevice() : null;
-        if (device == null) return;
-        int[] counts = effectiveChannels(device.getInput(), device.getOutput());
+        AudioInput input = activeInput();
+        if (input == null) return;
+        int[] counts = effectiveChannels(input, activeOutputOrNull());
         String[] labels = new String[counts.length];
         int currentIdx = 0;
         for (int i = 0; i < counts.length; i++) {
@@ -761,9 +948,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private boolean validateFormat(int rate, int channels, int bits) {
-        UsbAudioDevice device = (service != null) ? service.getDevice() : null;
-        if (device == null) return false;
-        UsbAudioInput input = device.getInput();
+        AudioInput input = activeInput();
+        if (input == null) return false;
         try { input.stop(); } catch (Throwable ignored) {}
         boolean ok = input.configure(rate, channels, bits);
         if (ok) {
@@ -781,9 +967,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void persistFormat() {
-        UsbDevice usb = usbAudioManager.getConnectedDevice();
-        if (usb == null) return;
-        String dacKey = AppSettings.dacKey(usb.getVendorId(), usb.getProductId());
+        String dacKey = activeDacKey();
         settings.setSampleRate(dacKey, selectedRate);
         settings.setBitDepth(dacKey, selectedBits);
         settings.setChannelCount(dacKey, selectedChannels);
@@ -800,7 +984,7 @@ public class MainActivity extends AppCompatActivity {
             service.stopRecording();
         } else if (service.getState() == RecorderService.State.DEVICE_READY) {
             service.startRecording(selectedRate, selectedChannels, selectedBits,
-                    monitorOn, monitorVolume);
+                    monitorOn && !phoneMicMode, monitorVolume);
         }
     }
 
