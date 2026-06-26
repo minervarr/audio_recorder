@@ -27,7 +27,7 @@ import com.example.audio_recorder.MainActivity;
 import com.example.audio_recorder.R;
 import com.example.audio_recorder.engine.PlaybackEngine;
 import com.example.audio_recorder.engine.RecordingEngine;
-import com.example.audio_recorder.engine.WavSink;
+import com.example.audio_recorder.engine.FlacSink;
 import com.example.audio_recorder.settings.AppSettings;
 import com.nerio.audioengine.AudioInput;
 import com.nerio.audioengine.AudioRecordInput;
@@ -449,7 +449,7 @@ public class RecorderService extends Service {
                 transition(State.IDLE, null);
                 return;
             }
-            engine = new RecordingEngine(this, in, d, new WavSink(in));
+            engine = new RecordingEngine(this, in, d, new FlacSink(in));
             if (!engine.start(rate, channels, bits, monitor, monitorVolume)) {
                 engine = null;
                 stopForegroundSafely();
