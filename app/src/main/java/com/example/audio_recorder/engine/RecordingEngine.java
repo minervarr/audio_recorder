@@ -179,7 +179,9 @@ public class RecordingEngine {
                     // UsbAudioOutput defaults currentVolumeLinear to 0f (silence).
                     // Apply the user's chosen monitor volume before opening the tap.
                     output.setVolume(monitorVolume);
+                    if (input instanceof UsbAudioInput) {
                     ((UsbAudioInput) input).setMonitorOutput(output, outCh);
+                }
                     monitoring = true;
                 }
             }
@@ -217,7 +219,7 @@ public class RecordingEngine {
     // tempFile — startRecording() will truncate and rewrite it.
     private void teardownAttempt() {
         if (monitoring) {
-            try { ((UsbAudioInput) input).setMonitorOutput(null); } catch (Throwable ignored) {}
+            try { if (input instanceof UsbAudioInput) ((UsbAudioInput) input).setMonitorOutput(null); } catch (Throwable ignored) {}
         }
         try { sink.endRecording(); } catch (Throwable t) {
             Log.w(TAG, "teardownAttempt: sink.endRecording threw", t);
@@ -240,7 +242,7 @@ public class RecordingEngine {
         // Detach the monitor tap before draining the record loop so the drain
         // doesn't keep writing into an output we're about to stop.
         if (monitoring) {
-            try { ((UsbAudioInput) input).setMonitorOutput(null); } catch (Throwable ignored) {}
+            try { if (input instanceof UsbAudioInput) ((UsbAudioInput) input).setMonitorOutput(null); } catch (Throwable ignored) {}
         }
         try {
             sink.endRecording();

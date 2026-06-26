@@ -376,10 +376,11 @@ public class MainActivity extends AppCompatActivity {
                 binding.bestFormatSwitch.setEnabled(true);
                 binding.latencySwitch.setEnabled(true);
                 binding.aiModeSwitch.setEnabled(true);
-                // Dual capture: show when USB is connected AND phone mic is also available.
+                // Dual capture: show when USB is connected AND the phone has a mic.
+                boolean hasMic = getPackageManager().hasSystemFeature(
+                        android.content.pm.PackageManager.FEATURE_MICROPHONE);
                 binding.dualCaptureSwitch.setVisibility(
-                        !phoneMicMode && service != null && service.isPhoneMicAvailable()
-                                ? View.VISIBLE : View.GONE);
+                        !phoneMicMode && hasMic ? View.VISIBLE : View.GONE);
                 binding.dualCaptureSwitch.setEnabled(true);
                 applyFormatButtonsEnabled();
                 break;

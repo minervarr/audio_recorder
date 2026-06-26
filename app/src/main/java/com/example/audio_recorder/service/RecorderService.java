@@ -96,6 +96,11 @@ public class RecorderService extends Service {
         controlHandler = new Handler(controlThread.getLooper());
         mainHandler = new Handler(Looper.getMainLooper());
         tickHandler = new Handler(Looper.getMainLooper());
+        // Initialise phone mic eagerly so it's available for dual capture even
+        // when a USB device is attached (releasePhoneMic is no longer called
+        // on USB attach — USB records separately without stopping the mic object).
+        AudioRecordInput mic = new AudioRecordInput(this);
+        if (mic.isAvailable()) phoneMicInput = mic;
     }
 
     @Override
@@ -231,8 +236,7 @@ public class RecorderService extends Service {
             transition(State.ERROR, "Device has no capture-capable formats");
             return;
         }
-        // USB takes precedence over the built-in mic fallback.
-        releasePhoneMic();
+        // Keep phoneMicInput alive for potential dual capture alongside USB.
         this.usbDevice = usbDev;
         this.deviceConnection = conn;
         this.device = d;
@@ -453,17 +457,21 @@ public class RecorderService extends Service {
             boolean dualEnabled = settings.isDualCapture();
             boolean isDual = false;
 
+            // effectiveRate is what gets passed to engine.start(). In dual-AI mode it
+            // prefers a rate that is cheap to downsample to 48 kHz for DfNet.
+            int effectiveRate = rate;
+
             if (d != null && d.isValid()) {
                 d.setLatencyProfile(settings.getLatencyProfile());
                 // Dual capture: USB + built-in mic combined.
                 if (dualEnabled && mic != null) {
                     boolean aiMode = (mode == RecordingMode.AI);
-                    int aiRate = aiMode
-                            ? FormatSelector.bestAiCaptureRate(d)
-                            : rate;
+                    if (aiMode) effectiveRate = FormatSelector.bestAiCaptureRate(d);
                     DualAudioInput dual = new DualAudioInput(
                             this, d.getNativeHandle(), aiMode);
-                    dual.configure(aiRate, channels, bits);
+                    // Pre-configure so DualAudioInput.configure() is idempotent when
+                    // RecordingEngine calls it again internally.
+                    dual.configure(effectiveRate, channels, bits);
                     in = dual;
                     isDual = true;
                 } else {
@@ -481,7 +489,7 @@ public class RecorderService extends Service {
             }
             // Dual mode passes null device so RecordingEngine skips the USB monitor path.
             engine = new RecordingEngine(this, in, isDual ? null : d, new FlacSink(in));
-            if (!engine.start(rate, channels, bits, monitor, monitorVolume)) {
+            if (!engine.start(effectiveRate, channels, bits, monitor, monitorVolume)) {
                 engine = null;
                 stopForegroundSafely();
                 transition(State.ERROR, "Could not start capture");
