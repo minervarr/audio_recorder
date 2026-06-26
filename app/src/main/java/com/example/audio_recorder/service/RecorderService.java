@@ -29,9 +29,13 @@ import com.example.audio_recorder.engine.PlaybackEngine;
 import com.example.audio_recorder.engine.RecordingEngine;
 import com.example.audio_recorder.engine.FlacSink;
 import com.example.audio_recorder.settings.AppSettings;
+import com.example.audio_recorder.settings.AppSettings.RecordingMode;
 import com.nerio.audioengine.AudioInput;
 import com.nerio.audioengine.AudioRecordInput;
+import com.nerio.audioengine.DualAudioInput;
+import com.nerio.audioengine.FormatSelector;
 import com.nerio.audioengine.UsbAudioDevice;
+import com.nerio.audioengine.UsbAudioNative;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -80,6 +84,7 @@ public class RecorderService extends Service {
     private volatile State state = State.IDLE;
     private long recordingStartElapsed;
     private Uri lastRecordingUri;
+    private Uri lastAiRecordingUri;  // non-null after AI dual recording
     private String lastError;
 
     @Override
@@ -137,6 +142,11 @@ public class RecorderService extends Service {
     }
 
     @Nullable
+    public Uri getLastAiRecordingUri() {
+        return lastAiRecordingUri;
+    }
+
+    @Nullable
     public String getLastError() {
         return lastError;
     }
@@ -148,6 +158,11 @@ public class RecorderService extends Service {
     /** True when ready to record from the built-in mic (no USB device attached). */
     public boolean isPhoneMic() {
         return device == null && phoneMicInput != null;
+    }
+
+    /** True when the built-in mic is initialised and can act as the second source in dual capture. */
+    public boolean isPhoneMicAvailable() {
+        return phoneMicInput != null;
     }
 
     @Nullable
@@ -434,11 +449,26 @@ public class RecorderService extends Service {
             AudioRecordInput mic = phoneMicInput;
             AudioInput in;
             AppSettings settings = new AppSettings(this);
+            RecordingMode mode = settings.getRecordingMode();
+            boolean dualEnabled = settings.isDualCapture();
+            boolean isDual = false;
+
             if (d != null && d.isValid()) {
-                // Buffering profile must land before configure()/start —
-                // the native side ignores changes mid-stream.
                 d.setLatencyProfile(settings.getLatencyProfile());
-                in = d.getInput();
+                // Dual capture: USB + built-in mic combined.
+                if (dualEnabled && mic != null) {
+                    boolean aiMode = (mode == RecordingMode.AI);
+                    int aiRate = aiMode
+                            ? FormatSelector.bestAiCaptureRate(d)
+                            : rate;
+                    DualAudioInput dual = new DualAudioInput(
+                            this, d.getNativeHandle(), aiMode);
+                    dual.configure(aiRate, channels, bits);
+                    in = dual;
+                    isDual = true;
+                } else {
+                    in = d.getInput();
+                }
             } else if (d == null && mic != null) {
                 mic.setLatencyProfile(settings.getLatencyProfile());
                 in = mic;
@@ -449,7 +479,8 @@ public class RecorderService extends Service {
                 transition(State.IDLE, null);
                 return;
             }
-            engine = new RecordingEngine(this, in, d, new FlacSink(in));
+            // Dual mode passes null device so RecordingEngine skips the USB monitor path.
+            engine = new RecordingEngine(this, in, isDual ? null : d, new FlacSink(in));
             if (!engine.start(rate, channels, bits, monitor, monitorVolume)) {
                 engine = null;
                 stopForegroundSafely();
@@ -474,8 +505,9 @@ public class RecorderService extends Service {
         long capturedFrames = 0;
         if (e != null) {
             try { e.stop(); } catch (Throwable t) { Log.w(TAG, "engine.stop threw", t); }
-            lastRecordingUri = e.getOutputUri();
-            capturedFrames = e.getCapturedFrames();
+            lastRecordingUri   = e.getOutputUri();
+            lastAiRecordingUri = e.getAiOutputUri();
+            capturedFrames     = e.getCapturedFrames();
         }
         stopForegroundSafely();
         // Empty capture: surface the error toast (via ERROR), then immediately

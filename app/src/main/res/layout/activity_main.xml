@@ -122,6 +122,27 @@
             android:trackTint="@color/green_dim"
             android:text="@string/latency_label" />
 
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/ai_mode_switch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textColor="@color/text_primary"
+            android:thumbTint="@color/green_bright"
+            android:trackTint="@color/green_dim"
+            android:text="@string/ai_mode_label" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/dual_capture_switch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textColor="@color/text_primary"
+            android:thumbTint="@color/green_bright"
+            android:trackTint="@color/green_dim"
+            android:text="@string/dual_capture_label"
+            android:visibility="gone" />
+
         <LinearLayout
             android:id="@+id/monitor_volume_row"
             android:layout_width="match_parent"

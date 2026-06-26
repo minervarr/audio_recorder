@@ -197,6 +197,16 @@ public class MainActivity extends AppCompatActivity {
                 settings.setLatencyProfile(isChecked
                         ? LatencyProfile.LOW_LATENCY : LatencyProfile.STABLE));
 
+        binding.aiModeSwitch.setChecked(
+                settings.getRecordingMode() == AppSettings.RecordingMode.AI);
+        binding.aiModeSwitch.setOnCheckedChangeListener((b, isChecked) ->
+                settings.setRecordingMode(isChecked
+                        ? AppSettings.RecordingMode.AI : AppSettings.RecordingMode.RAW));
+
+        binding.dualCaptureSwitch.setChecked(settings.isDualCapture());
+        binding.dualCaptureSwitch.setOnCheckedChangeListener((b, isChecked) ->
+                settings.setDualCapture(isChecked));
+
         binding.monitorVolumeSeekbar.setOnSeekBarChangeListener(
                 new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -331,6 +341,7 @@ public class MainActivity extends AppCompatActivity {
         deviceAttached = false;
         phoneMicMode = false;
         applyMonitorRowVisibility();
+        binding.dualCaptureSwitch.setVisibility(View.GONE);
         binding.formatDiagnosticText.setVisibility(View.GONE);
     }
 
@@ -364,6 +375,12 @@ public class MainActivity extends AppCompatActivity {
                 binding.monitorSwitch.setEnabled(!phoneMicMode);
                 binding.bestFormatSwitch.setEnabled(true);
                 binding.latencySwitch.setEnabled(true);
+                binding.aiModeSwitch.setEnabled(true);
+                // Dual capture: show when USB is connected AND phone mic is also available.
+                binding.dualCaptureSwitch.setVisibility(
+                        !phoneMicMode && service != null && service.isPhoneMicAvailable()
+                                ? View.VISIBLE : View.GONE);
+                binding.dualCaptureSwitch.setEnabled(true);
                 applyFormatButtonsEnabled();
                 break;
             case RECORDING:
@@ -372,6 +389,8 @@ public class MainActivity extends AppCompatActivity {
                 binding.monitorSwitch.setEnabled(false);
                 binding.bestFormatSwitch.setEnabled(false);
                 binding.latencySwitch.setEnabled(false);
+                binding.aiModeSwitch.setEnabled(false);
+                binding.dualCaptureSwitch.setEnabled(false);
                 binding.sampleRateButton.setEnabled(false);
                 binding.bitDepthButton.setEnabled(false);
                 binding.channelsButton.setEnabled(false);

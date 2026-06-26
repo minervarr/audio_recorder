@@ -16,6 +16,11 @@
     <string name="format_unavailable">Format unavailable on this device</string>
     <string name="best_format_label">Best available format</string>
     <string name="latency_label">Low-latency mode (smaller buffers)</string>
+    <string name="ai_mode_label">AI noise reduction (DeepFilterNet3)</string>
+    <string name="dual_capture_label">Dual mic — USB + built-in</string>
+    <string name="recording_processing">Processing — AI denoising…</string>
+    <string name="recording_raw_suffix">(raw)</string>
+    <string name="recording_ai_suffix">(AI denoised)</string>
 
     <string name="phone_mic_name">Built-in microphone</string>
     <string name="phone_mic_unprocessed">Unprocessed source · no platform DSP</string>

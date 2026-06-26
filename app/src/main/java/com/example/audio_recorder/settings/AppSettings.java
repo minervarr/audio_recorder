@@ -12,6 +12,10 @@ public class AppSettings {
     private static final String KEY_MONITOR_VIA_OUTPUT = "monitor_via_output";
     private static final String KEY_LAST_DEVICE_KEY = "last_device_key";
     private static final String KEY_LATENCY_PROFILE = "latency_profile";
+    private static final String KEY_RECORDING_MODE = "recording_mode";
+    private static final String KEY_DUAL_CAPTURE = "dual_capture";
+
+    public enum RecordingMode { RAW, AI }
 
     /** Pseudo device key for built-in-mic format persistence. */
     public static final String PHONE_MIC_KEY = "phone-mic";
@@ -137,6 +141,24 @@ public class AppSettings {
 
     public String getEqProfileForm() {
         return prefs.getString(KEY_EQ_PROFILE_FORM, "");
+    }
+
+    public RecordingMode getRecordingMode() {
+        return "ai".equals(prefs.getString(KEY_RECORDING_MODE, "raw"))
+                ? RecordingMode.AI : RecordingMode.RAW;
+    }
+
+    public void setRecordingMode(RecordingMode mode) {
+        prefs.edit().putString(KEY_RECORDING_MODE,
+                mode == RecordingMode.AI ? "ai" : "raw").apply();
+    }
+
+    public boolean isDualCapture() {
+        return prefs.getBoolean(KEY_DUAL_CAPTURE, false);
+    }
+
+    public void setDualCapture(boolean enabled) {
+        prefs.edit().putBoolean(KEY_DUAL_CAPTURE, enabled).apply();
     }
 
     public void setEqProfile(String name, String source, String form) {

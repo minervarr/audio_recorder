@@ -13,6 +13,7 @@ import android.provider.MediaStore;
 import android.util.Log;
 
 import com.nerio.audioengine.AudioInput;
+import com.nerio.audioengine.DualAudioInput;
 import com.nerio.audioengine.UsbAudioDevice;
 import com.nerio.audioengine.UsbAudioInput;
 import com.nerio.audioengine.UsbAudioOutput;
@@ -24,7 +25,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 
 public class RecordingEngine {
@@ -40,6 +43,7 @@ public class RecordingEngine {
 
     private File tempFile;
     private Uri outputUri;
+    private Uri aiOutputUri;   // non-null after stop() in AI dual mode
     private boolean monitoring;
     private long startMs;
     private long lastSessionFrames;
@@ -279,6 +283,19 @@ public class RecordingEngine {
             }
             tempFile = null;
         }
+
+        // Promote AI side-car if dual input produced one.
+        aiOutputUri = null;
+        if (input instanceof DualAudioInput) {
+            File aiFile = ((DualAudioInput) input).getAiFlacFile();
+            if (aiFile != null && aiFile.exists() && aiFile.length() > 0) {
+                try {
+                    aiOutputUri = promoteFileToMediaStore(aiFile);
+                } catch (IOException e) {
+                    Log.e(TAG, "AI FLAC promote failed", e);
+                }
+            }
+        }
     }
 
     /** Final PCM frame count from the last stop(). Zero means nothing was captured. */
@@ -297,6 +314,19 @@ public class RecordingEngine {
 
     public Uri getOutputUri() {
         return outputUri;
+    }
+
+    /** Non-null when AI dual mode produced a denoised side-car FLAC. */
+    public Uri getAiOutputUri() {
+        return aiOutputUri;
+    }
+
+    /** All output URIs (raw FLAC + optional AI FLAC). */
+    public List<Uri> getAllOutputUris() {
+        List<Uri> list = new ArrayList<>();
+        if (outputUri != null) list.add(outputUri);
+        if (aiOutputUri != null) list.add(aiOutputUri);
+        return list;
     }
 
     public long getStartTimeMs() {
@@ -324,6 +354,10 @@ public class RecordingEngine {
     /** Frame counter from the capture loop. Diagnostic for the Bug 1 empty-WAV case. */
     public long getFramesWritten() {
         return input != null ? input.getFramesWritten() : 0;
+    }
+
+    private Uri promoteFileToMediaStore(File source) throws IOException {
+        return promoteToMediaStore(source);
     }
 
     private Uri promoteToMediaStore(File source) throws IOException {
