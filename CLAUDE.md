@@ -10,22 +10,11 @@ Target user: an audiophile who plugs a USB audio interface into an Android phone
 
 ## Current state — important
 
-This is a **minimal scaffold only**. The app builds and launches into a placeholder screen. **None of the recording logic is implemented yet.** The next session is expected to do that work.
+The `audioengine` submodule is the C++ `audio_engine` (zero `.java`). The app links it from `app/src/main/cpp`. Capture, monitor, WAV writing, and WAV/FLAC playback live in `session.cc`, called directly from `RecorderView`. The manifest activity is `android.app.NativeActivity`. The screen is drawn with `framework/app_shell` and `framework/vk_canvas`. The only project Java is `RecorderService`: the USB connection, the microphone foreground notification, and the MediaStore insert.
 
-What exists:
+Not in the native path: the old dual/AI capture (DfNet) and parametric EQ profiles. Those switches still save preferences; they do not change the signal. New recordings are WAV. Playback opens WAV and FLAC.
 
-- Gradle 9.2.1 / AGP 9.0.1 multi-module project skeleton (only `:app` is wired up so far)
-- AndroidManifest with `RECORD_AUDIO`, USB host, foreground service permissions, and `USB_DEVICE_ATTACHED` intent filter on `MainActivity`
-- `MainActivity` that inflates a placeholder layout
-- Full theme + colors + CMU Serif font copied from Matrix Player (renamed `Theme.MatrixPlayer` → `Theme.AudioRecorder`)
-- `.gitmodules` declaring `audioengine` submodule at <https://github.com/minervarr/audio_engine.git> — **not yet cloned**
-
-What is missing:
-
-- The `audioengine` submodule directory is empty (run `git submodule update --init --recursive`)
-- `:audioengine` is **commented out** in `settings.gradle` and the app does not yet depend on it
-- No recording code, no UI beyond a placeholder TextView, no file output, no service
-- The engine itself does **not yet support recording** — it is playback-only (see "Audio engine integration" below)
+`:audioengine` is not a Gradle module. Do not look for `com.nerio.audioengine`.
 
 ## Build commands
 
@@ -227,7 +216,7 @@ Theme styles defined: `Theme.AudioRecorder`, `Theme.AudioRecorder.Dialog`, `Widg
 ## Conventions
 
 Match Matrix Player where it makes sense:
-- **Java only** (no Kotlin, despite the kotlin plugin being in the version catalog — that's just inherited)
+- **C++ for audio, Java only where Android requires it** (views, permissions, notifications, MediaStore). No Kotlin.
 - **View binding** for layouts (no Compose)
 - **No third-party libraries** for audio, networking, or image loading
 - Match the existing dark/green aesthetic in any new UI

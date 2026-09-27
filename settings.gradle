@@ -24,4 +24,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "audio_recorder"
 include ':app'
-include ':audioengine'

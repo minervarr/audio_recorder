@@ -48,6 +48,9 @@ captures/
 .externalNativeBuild
 .cxx/
 
+# SPIR-V compiled into the APK by CMake. Not source.
+app/src/main/assets/shaders/
+
 # Google Services (e.g. APIs or Firebase)
 google-services.json
 

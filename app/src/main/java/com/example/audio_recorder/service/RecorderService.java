@@ -1,614 +1,491 @@
 package com.example.audio_recorder.service;
 
-import android.annotation.SuppressLint;
+import android.app.Activity;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.ContentValues;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.database.Cursor;
+import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
+import android.hardware.usb.UsbInterface;
+import android.hardware.usb.UsbManager;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
-import android.os.Binder;
 import android.os.Build;
-import android.os.Handler;
-import android.os.HandlerThread;
+import android.os.Environment;
 import android.os.IBinder;
-import android.os.Looper;
-import android.os.SystemClock;
+import android.os.ParcelFileDescriptor;
+import android.provider.MediaStore;
 import android.util.Log;
 
-import androidx.annotation.Nullable;
-import androidx.core.app.NotificationCompat;
-
-import com.example.audio_recorder.MainActivity;
 import com.example.audio_recorder.R;
-import com.example.audio_recorder.engine.PlaybackEngine;
-import com.example.audio_recorder.engine.RecordingEngine;
-import com.example.audio_recorder.engine.FlacSink;
-import com.example.audio_recorder.settings.AppSettings;
-import com.example.audio_recorder.settings.AppSettings.RecordingMode;
-import com.nerio.audioengine.AudioInput;
-import com.nerio.audioengine.AudioRecordInput;
-import com.nerio.audioengine.DualAudioInput;
-import com.nerio.audioengine.FormatSelector;
-import com.nerio.audioengine.UsbAudioDevice;
-import com.nerio.audioengine.UsbAudioNative;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 
+/**
+ * The only Java in the app. NativeActivity draws the screen. This class holds
+ * the objects the NDK cannot: the USB connection (the fd dies with it), the
+ * microphone foreground notification, and the MediaStore row.
+ */
 public class RecorderService extends Service {
 
     private static final String TAG = "RecorderService";
     private static final String CHANNEL_ID = "recorder";
     private static final int NOTIFICATION_ID = 1;
     private static final String ACTION_STOP = "com.example.audio_recorder.action.STOP_RECORDING";
+    private static final String ACTION_USB_PERMISSION =
+            "com.example.audio_recorder.USB_PERMISSION";
 
-    public enum State { IDLE, DEVICE_READY, RECORDING, PLAYING, ERROR }
+    static { System.loadLibrary("recorder_core"); }
 
-    public interface StateListener {
-        void onState(State state, @Nullable String error);
+    private static native void nativeOnStop();
+    private static native void nativeOnUsb();
+
+    private static Context app;
+    private static Activity activity;
+    private static UsbManager usb;
+    private static boolean registered;
+    private static RecorderService instance;
+    private static String noteText = "Starting…";
+
+    private static final List<Slot> slots = new ArrayList<>();
+    private static UsbDeviceConnection connection;
+    private static String openName = "";
+
+    private static final class Slot {
+        UsbDevice device;
+        boolean fresh;
+        boolean justGranted;
+        boolean denied;
     }
 
-    public class LocalBinder extends Binder {
-        public RecorderService get() { return RecorderService.this; }
-    }
-
-    private final IBinder binder = new LocalBinder();
-    private final List<StateListener> listeners = new ArrayList<>();
-
-    private volatile UsbAudioDevice device;
-    private volatile UsbDeviceConnection deviceConnection;
-    private volatile UsbDevice usbDevice;
-    // Built-in mic capture source, active only while no USB device is attached.
-    private volatile AudioRecordInput phoneMicInput;
-    private volatile RecordingEngine engine;
-    private PlaybackEngine playbackEngine;
-    private Uri currentPlaybackUri;
-
-    private HandlerThread controlThread;
-    private Handler controlHandler;
-    private Handler mainHandler;
-    private Handler tickHandler;
-    private final Runnable tickRunnable = new Runnable() {
-        @Override
-        public void run() {
-            updateNotification(buildNotification(true));
-            tickHandler.postDelayed(this, 1000);
+    private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context ctx, Intent intent) {
+            synchronized (RecorderService.class) {
+                String action = intent.getAction();
+                if (action == null) return;
+                if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
+                    UsbDevice d = deviceExtra(intent);
+                    if (d != null && isAudio(d)) {
+                        Slot s = slot(d);
+                        s.fresh = true;
+                        s.denied = false;
+                        nativeOnUsb();
+                    }
+                } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
+                    UsbDevice d = deviceExtra(intent);
+                    if (d != null) {
+                        removeSlot(d.getDeviceName());
+                        nativeOnUsb();
+                    }
+                } else if (ACTION_USB_PERMISSION.equals(action)) {
+                    UsbDevice d = deviceExtra(intent);
+                    boolean granted = intent.getBooleanExtra(
+                            UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                    if (d != null) {
+                        Slot s = slot(d);
+                        s.justGranted = granted;
+                        s.denied = !granted;
+                        nativeOnUsb();
+                    }
+                }
+            }
         }
     };
 
-    private volatile State state = State.IDLE;
-    private long recordingStartElapsed;
-    private Uri lastRecordingUri;
-    private Uri lastAiRecordingUri;  // non-null after AI dual recording
-    private String lastError;
-
-    @Override
-    public void onCreate() {
+    @Override public void onCreate() {
         super.onCreate();
-        createNotificationChannel();
-        controlThread = new HandlerThread("rec-control");
-        controlThread.start();
-        controlHandler = new Handler(controlThread.getLooper());
-        mainHandler = new Handler(Looper.getMainLooper());
-        tickHandler = new Handler(Looper.getMainLooper());
-        // Initialise phone mic eagerly so it's available for dual capture even
-        // when a USB device is attached (releasePhoneMic is no longer called
-        // on USB attach — USB records separately without stopping the mic object).
-        AudioRecordInput mic = new AudioRecordInput(this);
-        if (mic.isAvailable()) phoneMicInput = mic;
+        instance = this;
+        ensureContext(this);
+        NotificationChannel ch = new NotificationChannel(CHANNEL_ID,
+                getString(R.string.recording_notification_channel),
+                NotificationManager.IMPORTANCE_LOW);
+        ch.setDescription(getString(R.string.recording_notification_channel_desc));
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm != null) nm.createNotificationChannel(ch);
     }
 
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
+    @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-            stopRecording();
+            nativeOnStop();
+            return START_NOT_STICKY;
+        }
+        Notification n = buildNotification(noteText);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+        } else {
+            startForeground(NOTIFICATION_ID, n);
         }
         return START_NOT_STICKY;
     }
 
-    @Override
-    public IBinder onBind(Intent intent) {
-        return binder;
-    }
-
-    @Override
-    public void onDestroy() {
+    @Override public void onDestroy() {
+        if (instance == this) instance = null;
         super.onDestroy();
-        if (state == State.RECORDING) {
-            stopRecordingInternal();
+    }
+
+    @Override public IBinder onBind(Intent intent) { return null; }
+
+    // ── Called from native ──────────────────────────────────────────────────
+
+    public static synchronized void bind(Activity a) {
+        activity = a;
+        ensureContext(a);
+    }
+
+    public static boolean hasRecordAudio() {
+        return granted(android.Manifest.permission.RECORD_AUDIO);
+    }
+
+    public static boolean hasNotifications() {
+        if (Build.VERSION.SDK_INT < 33) return true;
+        return granted(android.Manifest.permission.POST_NOTIFICATIONS);
+    }
+
+    public static void requestMissing() {
+        if (activity == null) return;
+        List<String> need = new ArrayList<>();
+        if (!hasRecordAudio()) need.add(android.Manifest.permission.RECORD_AUDIO);
+        if (Build.VERSION.SDK_INT >= 33 && !hasNotifications())
+            need.add(android.Manifest.permission.POST_NOTIFICATIONS);
+        if (Build.VERSION.SDK_INT >= 33
+                && !granted(android.Manifest.permission.READ_MEDIA_AUDIO))
+            need.add(android.Manifest.permission.READ_MEDIA_AUDIO);
+        else if (Build.VERSION.SDK_INT < 33
+                && !granted(android.Manifest.permission.READ_EXTERNAL_STORAGE))
+            need.add(android.Manifest.permission.READ_EXTERNAL_STORAGE);
+        if (need.isEmpty()) return;
+        activity.requestPermissions(need.toArray(new String[0]), 1);
+    }
+
+    /** name, label, vendor, product, permission, fresh, justGranted, denied. */
+    public static synchronized String[] devices() {
+        if (usb == null) return new String[0];
+        HashMap<String, UsbDevice> live = usb.getDeviceList();
+        List<String> out = new ArrayList<>();
+        List<Slot> keep = new ArrayList<>();
+        for (Slot s : slots) {
+            UsbDevice d = s.device;
+            if (d == null || !live.containsKey(d.getDeviceName())) continue;
+            keep.add(s);
+            String label = d.getProductName() != null ? d.getProductName() : d.getDeviceName();
+            int perm = usb.hasPermission(d) ? 1 : 0;
+            out.add(d.getDeviceName() + "\t" + label + "\t" + d.getVendorId()
+                    + "\t" + d.getProductId() + "\t" + perm
+                    + "\t" + (s.fresh ? 1 : 0)
+                    + "\t" + (s.justGranted ? 1 : 0)
+                    + "\t" + (s.denied ? 1 : 0));
+            s.fresh = false;
+            s.justGranted = false;
         }
-        if (state == State.PLAYING) {
-            stopPlaybackInternal();
+        slots.clear();
+        slots.addAll(keep);
+        // Devices that appeared without a broadcast (already plugged in).
+        for (UsbDevice d : live.values()) {
+            if (!isAudio(d) || find(d.getDeviceName()) != null) continue;
+            Slot s = slot(d);
+            String label = d.getProductName() != null ? d.getProductName() : d.getDeviceName();
+            int perm = usb.hasPermission(d) ? 1 : 0;
+            out.add(d.getDeviceName() + "\t" + label + "\t" + d.getVendorId()
+                    + "\t" + d.getProductId() + "\t" + perm + "\t0\t0\t0");
         }
-        detachDevice();
-        releasePhoneMic();
-        if (controlThread != null) {
-            controlThread.quitSafely();
-            controlThread = null;
-        }
+        return out.toArray(new String[0]);
     }
 
-    public State getState() {
-        return state;
-    }
-
-    public long getElapsedMs() {
-        if (state != State.RECORDING) return 0;
-        return SystemClock.elapsedRealtime() - recordingStartElapsed;
-    }
-
-    public Uri getLastRecordingUri() {
-        return lastRecordingUri;
-    }
-
-    @Nullable
-    public Uri getLastAiRecordingUri() {
-        return lastAiRecordingUri;
-    }
-
-    @Nullable
-    public String getLastError() {
-        return lastError;
-    }
-
-    public UsbAudioDevice getDevice() {
-        return device;
-    }
-
-    /** True when ready to record from the built-in mic (no USB device attached). */
-    public boolean isPhoneMic() {
-        return device == null && phoneMicInput != null;
-    }
-
-    /** True when the built-in mic is initialised and can act as the second source in dual capture. */
-    public boolean isPhoneMicAvailable() {
-        return phoneMicInput != null;
-    }
-
-    @Nullable
-    public AudioRecordInput getPhoneMicInput() {
-        return phoneMicInput;
-    }
-
-    /**
-     * Falls back to the built-in microphone as the capture source when no USB
-     * device is attached. No-op while a USB device is present or while
-     * recording/playing. Idempotent.
-     */
-    public void attachPhoneMic() {
-        if (device != null || state == State.RECORDING || state == State.PLAYING) return;
-        if (phoneMicInput == null) {
-            AudioRecordInput mic = new AudioRecordInput(this);
-            if (!mic.isAvailable()) {
-                Log.i(TAG, "attachPhoneMic: no microphone on this device");
-                return;
-            }
-            phoneMicInput = mic;
-        }
-        if (state != State.DEVICE_READY) {
-            transition(State.DEVICE_READY, null);
-        }
-    }
-
-    @Nullable
-    public RecordingEngine getEngine() {
-        return engine;
-    }
-
-    public void registerListener(StateListener l) {
-        if (l != null && !listeners.contains(l)) listeners.add(l);
-    }
-
-    public void unregisterListener(StateListener l) {
-        listeners.remove(l);
-    }
-
-    public void attachDevice(UsbDevice usbDev, UsbDeviceConnection conn) {
-        if (state == State.RECORDING) {
-            Log.w(TAG, "attachDevice called while recording; ignoring");
+    public static synchronized void requestPermission(String name) {
+        Slot s = find(name);
+        if (s == null || usb == null || s.device == null) return;
+        if (usb.hasPermission(s.device)) {
+            s.justGranted = true;
+            nativeOnUsb();
             return;
         }
-        if (state == State.PLAYING) {
-            Log.w(TAG, "attachDevice called while playing; stopping playback first");
-            stopPlaybackInternal();
+        PendingIntent pi = PendingIntent.getBroadcast(app, 0,
+                new Intent(ACTION_USB_PERMISSION).setPackage(app.getPackageName()),
+                PendingIntent.FLAG_IMMUTABLE);
+        usb.requestPermission(s.device, pi);
+    }
+
+    public static synchronized int open(String name) {
+        Slot s = find(name);
+        if (s == null || usb == null || s.device == null) return -1;
+        if (!usb.hasPermission(s.device)) return -1;
+        if (connection != null && name.equals(openName))
+            return connection.getFileDescriptor();
+        close();
+        connection = usb.openDevice(s.device);
+        if (connection == null) return -1;
+        openName = name;
+        return connection.getFileDescriptor();
+    }
+
+    public static synchronized void close() {
+        if (connection != null) {
+            try { connection.close(); } catch (Throwable ignored) {}
+            connection = null;
         }
-        detachDevice();
-        if (conn == null) {
-            transition(State.ERROR, "USB open failed");
-            return;
-        }
-        int fd = conn.getFileDescriptor();
-        UsbAudioDevice d = new UsbAudioDevice(fd);
-        if (!d.isValid()) {
-            d.close();
-            try { conn.close(); } catch (Throwable ignored) {}
-            transition(State.ERROR, "Engine could not open device");
-            return;
-        }
-        if (!d.getInput().isAvailable()) {
-            d.close();
-            try { conn.close(); } catch (Throwable ignored) {}
-            transition(State.ERROR, "Device has no capture-capable formats");
-            return;
-        }
-        // Keep phoneMicInput alive for potential dual capture alongside USB.
-        this.usbDevice = usbDev;
-        this.deviceConnection = conn;
-        this.device = d;
-        transition(State.DEVICE_READY, null);
+        openName = "";
     }
 
-    private void releasePhoneMic() {
-        AudioRecordInput mic = phoneMicInput;
-        phoneMicInput = null;
-        if (mic != null) {
-            try { mic.release(); } catch (Throwable t) { Log.w(TAG, "mic.release threw", t); }
-        }
+    public static synchronized String opened() { return openName == null ? "" : openName; }
+
+    public static String cacheDir() {
+        if (app == null) return "";
+        return app.getCacheDir().getAbsolutePath();
     }
 
-    public void detachDevice() {
-        if (state == State.RECORDING) {
-            stopRecordingInternal();
-        }
-        if (state == State.PLAYING) {
-            stopPlaybackInternal();
-        }
-        if (device != null) {
-            try { device.close(); } catch (Throwable t) { Log.w(TAG, "device.close threw", t); }
-            device = null;
-        }
-        if (deviceConnection != null) {
-            try { deviceConnection.close(); } catch (Throwable ignored) {}
-            deviceConnection = null;
-        }
-        usbDevice = null;
-        if (state != State.IDLE) {
-            transition(State.IDLE, null);
-        }
+    public static void beginForeground(String text) {
+        noteText = text != null ? text : "Starting…";
+        if (app == null) return;
+        Intent i = new Intent(app, RecorderService.class);
+        app.startForegroundService(i);
     }
 
-    public void startRecording(int rate, int channels, int bits, boolean monitor,
-                               float monitorVolume) {
-        if (state != State.DEVICE_READY) {
-            Log.w(TAG, "startRecording in state " + state);
-            return;
-        }
-        if (isPhoneMic()) {
-            startForegroundSafely();
-            controlHandler.post(() -> doStart(rate, channels, bits, false, monitorVolume));
-            return;
-        }
-        UsbAudioDevice d = device;
-        UsbDeviceConnection conn = deviceConnection;
-        if (d == null || !d.isValid() || conn == null) {
-            Log.w(TAG, "startRecording: USB device no longer valid (device="
-                    + (d != null) + " valid=" + (d != null && d.isValid())
-                    + " conn=" + (conn != null) + ")");
-            transition(State.ERROR, "USB device disconnected");
-            if (d != null && d.isValid()) {
-                transition(State.DEVICE_READY, null);
-            } else {
-                transition(State.IDLE, null);
-            }
-            return;
-        }
-        startForegroundSafely();
-        controlHandler.post(() -> doStart(rate, channels, bits, monitor, monitorVolume));
+    public static void updateForeground(String text) {
+        noteText = text != null ? text : noteText;
+        if (instance == null) return;
+        NotificationManager nm = instance.getSystemService(NotificationManager.class);
+        if (nm != null) nm.notify(NOTIFICATION_ID, instance.buildNotification(noteText));
     }
 
-    public void stopRecording() {
-        if (state != State.RECORDING) return;
-        controlHandler.post(this::stopRecordingInternal);
+    public static void endForeground() {
+        if (instance == null) return;
+        instance.stopForeground(STOP_FOREGROUND_REMOVE);
+        instance.stopSelf();
     }
 
-    public void setMonitorVolume(float linear01) {
-        RecordingEngine e = engine;
-        if (e == null) return;
-        controlHandler.post(() -> e.setMonitorVolume(linear01));
-    }
-
-    // --- Playback ---
-
-    public boolean startPlayback(Uri uri, float initialVolume,
-                                 PlaybackEngine.Listener listener) {
-        if (uri == null) return false;
-        if (state == State.RECORDING) {
-            Log.w(TAG, "startPlayback ignored: currently recording");
-            return false;
-        }
-        if (state == State.PLAYING) {
-            // Replace the active source with the new one.
-            stopPlaybackInternal();
-        }
-        currentPlaybackUri = uri;
-        AppSettings settings = new AppSettings(this);
-        PlaybackEngine pe = new PlaybackEngine(this, device, settings);
-        // Set volume BEFORE play() so AudioEngine.currentVolumeLinear is non-zero
-        // when switchOutput()'s pushVolumeStateToOutput() runs — otherwise the
-        // USB DAC starts at silence on the first track.
-        pe.setVolume(initialVolume);
-        pe.setListener(new PlaybackEngine.Listener() {
-            @Override public void onPrepared() {
-                if (listener != null) mainHandler.post(listener::onPrepared);
-            }
-            @Override public void onCompletion() {
-                if (listener != null) mainHandler.post(listener::onCompletion);
-                controlHandler.post(() -> {
-                    if (state == State.PLAYING) stopPlaybackInternal();
-                });
-            }
-            @Override public void onError(String message) {
-                if (listener != null) {
-                    mainHandler.post(() -> listener.onError(message));
-                }
-                controlHandler.post(() -> {
-                    if (state == State.PLAYING) stopPlaybackInternal();
-                });
-            }
-        });
-        playbackEngine = pe;
-        controlHandler.post(() -> {
-            try {
-                pe.play(uri);
-                transition(State.PLAYING, null);
-            } catch (Throwable t) {
-                Log.e(TAG, "playback start failed", t);
-                playbackEngine = null;
-                currentPlaybackUri = null;
-                transition((device != null && device.isValid()) || phoneMicInput != null
-                        ? State.DEVICE_READY : State.IDLE, null);
-            }
-        });
-        return true;
-    }
-
-    public void pausePlayback() {
-        PlaybackEngine pe = playbackEngine;
-        if (pe == null) return;
-        controlHandler.post(pe::pause);
-    }
-
-    public void resumePlayback() {
-        PlaybackEngine pe = playbackEngine;
-        if (pe == null) return;
-        controlHandler.post(pe::resume);
-    }
-
-    public void togglePlaybackPlayPause() {
-        PlaybackEngine pe = playbackEngine;
-        if (pe == null) return;
-        controlHandler.post(pe::togglePlayPause);
-    }
-
-    public void seekPlayback(int positionMs) {
-        PlaybackEngine pe = playbackEngine;
-        if (pe == null) return;
-        controlHandler.post(() -> pe.seekTo(positionMs));
-    }
-
-    public void stopPlayback() {
-        if (state != State.PLAYING) return;
-        controlHandler.post(this::stopPlaybackInternal);
-    }
-
-    public void reloadPlaybackEq() {
-        PlaybackEngine pe = playbackEngine;
-        if (pe == null) return;
-        controlHandler.post(pe::applyEqFromSettings);
-    }
-
-    public void setPlaybackVolume(float linear01) {
-        PlaybackEngine pe = playbackEngine;
-        if (pe == null) return;
-        controlHandler.post(() -> pe.setVolume(linear01));
-    }
-
-    @Nullable
-    public PlaybackEngine getPlaybackEngine() {
-        return playbackEngine;
-    }
-
-    @Nullable
-    public Uri getCurrentPlaybackUri() {
-        return currentPlaybackUri;
-    }
-
-    public boolean isPlaybackPlaying() {
-        PlaybackEngine pe = playbackEngine;
-        return pe != null && pe.isPlaying();
-    }
-
-    public int getPlaybackPositionMs() {
-        PlaybackEngine pe = playbackEngine;
-        return pe != null ? pe.getCurrentPositionMs() : 0;
-    }
-
-    public int getPlaybackDurationMs() {
-        PlaybackEngine pe = playbackEngine;
-        return pe != null ? pe.getDurationMs() : 0;
-    }
-
-    private void stopPlaybackInternal() {
-        PlaybackEngine pe = playbackEngine;
-        playbackEngine = null;
-        currentPlaybackUri = null;
-        if (pe != null) {
-            try { pe.stop(); } catch (Throwable t) { Log.w(TAG, "playback.stop threw", t); }
-        }
-        if (state == State.PLAYING) {
-            transition((device != null && device.isValid()) || phoneMicInput != null
-                    ? State.DEVICE_READY : State.IDLE, null);
-        }
-    }
-
-    private void doStart(int rate, int channels, int bits, boolean monitor,
-                         float monitorVolume) {
+    public static String publish(String path) {
+        if (app == null || path == null) return "";
+        File source = new File(path);
+        if (!source.isFile()) return "";
         try {
-            UsbAudioDevice d = device;
-            AudioRecordInput mic = phoneMicInput;
-            AudioInput in;
-            AppSettings settings = new AppSettings(this);
-            RecordingMode mode = settings.getRecordingMode();
-            boolean dualEnabled = settings.isDualCapture();
-            boolean isDual = false;
-
-            // effectiveRate is what gets passed to engine.start(). In dual-AI mode it
-            // prefers a rate that is cheap to downsample to 48 kHz for DfNet.
-            int effectiveRate = rate;
-
-            if (d != null && d.isValid()) {
-                d.setLatencyProfile(settings.getLatencyProfile());
-                // Dual capture: USB + built-in mic combined.
-                if (dualEnabled && mic != null) {
-                    boolean aiMode = (mode == RecordingMode.AI);
-                    if (aiMode) effectiveRate = FormatSelector.bestAiCaptureRate(d);
-                    DualAudioInput dual = new DualAudioInput(
-                            this, d.getNativeHandle(), aiMode);
-                    // Pre-configure so DualAudioInput.configure() is idempotent when
-                    // RecordingEngine calls it again internally.
-                    dual.configure(effectiveRate, channels, bits);
-                    in = dual;
-                    isDual = true;
-                } else {
-                    in = d.getInput();
-                }
-            } else if (d == null && mic != null) {
-                mic.setLatencyProfile(settings.getLatencyProfile());
-                in = mic;
-            } else {
-                Log.w(TAG, "doStart: device became invalid between schedule and run");
-                stopForegroundSafely();
-                transition(State.ERROR, "USB device disconnected");
-                transition(State.IDLE, null);
-                return;
-            }
-            // Dual mode passes null device so RecordingEngine skips the USB monitor path.
-            engine = new RecordingEngine(this, in, isDual ? null : d, new FlacSink(in));
-            if (!engine.start(effectiveRate, channels, bits, monitor, monitorVolume)) {
-                engine = null;
-                stopForegroundSafely();
-                transition(State.ERROR, "Could not start capture");
-                return;
-            }
-            recordingStartElapsed = SystemClock.elapsedRealtime();
-            transition(State.RECORDING, null);
-            mainHandler.post(() -> tickHandler.post(tickRunnable));
+            Uri uri = promote(source);
+            return uri != null ? uri.toString() : "";
         } catch (Throwable t) {
-            Log.e(TAG, "doStart failed", t);
-            engine = null;
-            stopForegroundSafely();
-            transition(State.ERROR, t.getMessage() != null ? t.getMessage() : "start failed");
+            Log.e(TAG, "publish failed", t);
+            return "";
         }
     }
 
-    private void stopRecordingInternal() {
-        mainHandler.post(() -> tickHandler.removeCallbacks(tickRunnable));
-        RecordingEngine e = engine;
-        engine = null;
-        long capturedFrames = 0;
-        if (e != null) {
-            try { e.stop(); } catch (Throwable t) { Log.w(TAG, "engine.stop threw", t); }
-            lastRecordingUri   = e.getOutputUri();
-            lastAiRecordingUri = e.getAiOutputUri();
-            capturedFrames     = e.getCapturedFrames();
+    public static String[] recordings() {
+        if (app == null) return new String[0];
+        List<String> out = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) queryStore(out);
+        else scanLegacy(out);
+        return out.toArray(new String[0]);
+    }
+
+    public static int openUri(String uri) {
+        if (app == null || uri == null || uri.isEmpty()) return -1;
+        try {
+            ParcelFileDescriptor pfd = app.getContentResolver()
+                    .openFileDescriptor(Uri.parse(uri), "r");
+            if (pfd == null) return -1;
+            return pfd.detachFd();
+        } catch (Throwable t) {
+            Log.e(TAG, "openUri failed", t);
+            return -1;
         }
-        stopForegroundSafely();
-        // Empty capture: surface the error toast (via ERROR), then immediately
-        // restore DEVICE_READY/IDLE so the UI is usable for a retry. The two
-        // notifications fire in order on the main thread, so the toast persists
-        // while applyState rebuilds the recording UI.
-        if (capturedFrames <= 0 && e != null) {
-            transition(State.ERROR, "No audio captured — device did not produce data");
-        }
-        if ((device != null && device.isValid()) || phoneMicInput != null) {
-            transition(State.DEVICE_READY, null);
+    }
+
+    // ── Internals ───────────────────────────────────────────────────────────
+
+    private static synchronized void ensureContext(Context c) {
+        if (app != null) return;
+        app = c.getApplicationContext();
+        usb = (UsbManager) app.getSystemService(Context.USB_SERVICE);
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+        filter.addAction(ACTION_USB_PERMISSION);
+        if (Build.VERSION.SDK_INT >= 33) {
+            app.registerReceiver(new RecorderService().usbReceiver, filter,
+                    Context.RECEIVER_NOT_EXPORTED);
         } else {
-            transition(State.IDLE, null);
+            app.registerReceiver(new RecorderService().usbReceiver, filter);
+        }
+        registered = true;
+        if (usb != null) {
+            for (UsbDevice d : usb.getDeviceList().values()) {
+                if (isAudio(d)) slot(d);
+            }
         }
     }
 
-    private void startForegroundSafely() {
-        Notification n = buildNotification(false);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, n,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
-        } else {
-            startForeground(NOTIFICATION_ID, n);
+    private static boolean granted(String perm) {
+        Context c = activity != null ? activity : app;
+        if (c == null) return false;
+        return c.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private static Slot slot(UsbDevice d) {
+        Slot s = find(d.getDeviceName());
+        if (s != null) {
+            s.device = d;
+            return s;
+        }
+        s = new Slot();
+        s.device = d;
+        slots.add(s);
+        return s;
+    }
+
+    private static Slot find(String name) {
+        for (Slot s : slots) {
+            if (s.device != null && name.equals(s.device.getDeviceName())) return s;
+        }
+        return null;
+    }
+
+    private static void removeSlot(String name) {
+        for (int i = slots.size() - 1; i >= 0; --i) {
+            Slot s = slots.get(i);
+            if (s.device != null && name.equals(s.device.getDeviceName()))
+                slots.remove(i);
         }
     }
 
-    private void stopForegroundSafely() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE);
-        } else {
-            stopForeground(true);
+    private static boolean isAudio(UsbDevice device) {
+        for (int i = 0; i < device.getInterfaceCount(); i++) {
+            UsbInterface iface = device.getInterface(i);
+            if (iface.getInterfaceClass() == UsbConstants.USB_CLASS_AUDIO) return true;
         }
+        return false;
     }
 
-    private void updateNotification(Notification n) {
-        NotificationManager nm = getSystemService(NotificationManager.class);
-        if (nm != null) nm.notify(NOTIFICATION_ID, n);
+    @SuppressWarnings("deprecation")
+    private static UsbDevice deviceExtra(Intent intent) {
+        if (Build.VERSION.SDK_INT >= 33)
+            return intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class);
+        return intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
     }
 
-    @SuppressLint("UnspecifiedImmutableFlag")
-    private Notification buildNotification(boolean showElapsed) {
-        Intent contentIntent = new Intent(this, MainActivity.class)
-                .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent contentPi = PendingIntent.getActivity(this, 0, contentIntent,
+    private Notification buildNotification(String text) {
+        Intent content = new Intent(this, android.app.NativeActivity.class);
+        content.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+        PendingIntent contentPi = PendingIntent.getActivity(this, 0, content,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-
-        Intent stopIntent = new Intent(this, RecorderService.class).setAction(ACTION_STOP);
-        PendingIntent stopPi = PendingIntent.getService(this, 1, stopIntent,
+        Intent stop = new Intent(this, RecorderService.class).setAction(ACTION_STOP);
+        PendingIntent stopPi = PendingIntent.getService(this, 1, stop,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-
-        String text = showElapsed
-                ? getString(R.string.recording_notification_text, formatElapsed(getElapsedMs()))
-                : getString(R.string.recording_notification_starting);
-
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
+        return new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_record)
                 .setContentTitle(getString(R.string.recording_notification_title))
                 .setContentText(text)
                 .setContentIntent(contentPi)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
-                .setCategory(NotificationCompat.CATEGORY_SERVICE)
-                .addAction(R.drawable.ic_stop,
-                        getString(R.string.recording_notification_action_stop), stopPi)
+                .setCategory(Notification.CATEGORY_SERVICE)
+                .addAction(new Notification.Action.Builder(null,
+                        getString(R.string.recording_notification_action_stop), stopPi).build())
                 .build();
     }
 
-    private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
-        NotificationManager nm = getSystemService(NotificationManager.class);
-        if (nm == null) return;
-        NotificationChannel ch = new NotificationChannel(CHANNEL_ID,
-                getString(R.string.recording_notification_channel),
-                NotificationManager.IMPORTANCE_LOW);
-        ch.setDescription(getString(R.string.recording_notification_channel_desc));
-        nm.createNotificationChannel(ch);
-    }
-
-    private void transition(State next, @Nullable String error) {
-        this.state = next;
-        this.lastError = error;
-        mainHandler.post(() -> {
-            for (StateListener l : new ArrayList<>(listeners)) {
-                try { l.onState(next, error); }
-                catch (Throwable t) { Log.w(TAG, "listener threw", t); }
+    private static Uri promote(File source) throws Exception {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContentResolver resolver = app.getContentResolver();
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.Audio.Media.DISPLAY_NAME, source.getName());
+            v.put(MediaStore.Audio.Media.MIME_TYPE, "audio/flac");
+            v.put(MediaStore.Audio.Media.RELATIVE_PATH,
+                    Environment.DIRECTORY_MUSIC + "/Recordings/");
+            v.put(MediaStore.Audio.Media.IS_PENDING, 1);
+            Uri collection = MediaStore.Audio.Media.getContentUri(
+                    MediaStore.VOLUME_EXTERNAL_PRIMARY);
+            Uri item = resolver.insert(collection, v);
+            if (item == null) throw new java.io.IOException("MediaStore insert returned null");
+            try (OutputStream os = resolver.openOutputStream(item);
+                 InputStream is = new FileInputStream(source)) {
+                if (os == null) throw new java.io.IOException("openOutputStream returned null");
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = is.read(buf)) > 0) os.write(buf, 0, n);
             }
-        });
+            v.clear();
+            v.put(MediaStore.Audio.Media.IS_PENDING, 0);
+            resolver.update(item, v, null, null);
+            return item;
+        }
+        File dir = new File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+                "Recordings");
+        if (!dir.exists() && !dir.mkdirs())
+            throw new java.io.IOException("could not create " + dir);
+        File dest = new File(dir, source.getName());
+        try (InputStream is = new FileInputStream(source);
+             OutputStream os = new FileOutputStream(dest)) {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = is.read(buf)) > 0) os.write(buf, 0, n);
+        }
+        MediaScannerConnection.scanFile(app, new String[]{dest.getAbsolutePath()},
+                new String[]{"audio/flac"}, null);
+        return Uri.fromFile(dest);
     }
 
-    private static String formatElapsed(long ms) {
-        long sec = ms / 1000;
-        long m = sec / 60;
-        long s = sec % 60;
-        return String.format(java.util.Locale.US, "%02d:%02d", m, s);
+    private static void queryStore(List<String> out) {
+        ContentResolver resolver = app.getContentResolver();
+        String[] projection = {
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.DURATION,
+                MediaStore.Audio.Media.SIZE,
+        };
+        String selection = MediaStore.Audio.Media.RELATIVE_PATH + " = ?";
+        String[] args = {Environment.DIRECTORY_MUSIC + "/Recordings/"};
+        Uri collection = MediaStore.Audio.Media.getContentUri(
+                MediaStore.VOLUME_EXTERNAL_PRIMARY);
+        try (Cursor c = resolver.query(collection, projection, selection, args,
+                MediaStore.Audio.Media.DATE_ADDED + " DESC")) {
+            if (c == null) return;
+            int idIdx = c.getColumnIndexOrThrow(MediaStore.Audio.Media._ID);
+            int nameIdx = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME);
+            int durIdx = c.getColumnIndex(MediaStore.Audio.Media.DURATION);
+            int sizeIdx = c.getColumnIndex(MediaStore.Audio.Media.SIZE);
+            while (c.moveToNext()) {
+                Uri uri = ContentUris.withAppendedId(collection, c.getLong(idIdx));
+                long dur = durIdx >= 0 ? c.getLong(durIdx) : 0;
+                long size = sizeIdx >= 0 ? c.getLong(sizeIdx) : 0;
+                String name = c.getString(nameIdx);
+                out.add(uri.toString() + "\t" + (name == null ? "" : name)
+                        + "\t" + dur + "\t" + size);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "query failed", t);
+        }
+    }
+
+    private static void scanLegacy(List<String> out) {
+        File dir = new File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+                "Recordings");
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        java.util.Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        for (File f : files) {
+            if (!f.isFile()) continue;
+            out.add(Uri.fromFile(f).toString() + "\t" + f.getName()
+                    + "\t0\t" + f.length());
+        }
     }
 }

@@ -5,6 +5,7 @@ plugins {
 android {
     namespace 'com.example.audio_recorder'
     compileSdk 36
+    ndkVersion '29.0.14206865'
 
     defaultConfig {
         applicationId "com.example.audio_recorder"
@@ -13,10 +14,14 @@ android {
         versionCode 1
         versionName "0.1"
 
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        externalNativeBuild {
+            cmake {
+                cppFlags '-std=c++17'
+            }
+        }
     }
-	
-	signingConfigs {
+
+    signingConfigs {
         release {
             storeFile file("../bruno.jks")
             storePassword "Tetas//2004//"
@@ -29,7 +34,7 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-			signingConfig signingConfigs.release
+            signingConfig signingConfigs.release
         }
     }
 
@@ -47,19 +52,34 @@ android {
         targetCompatibility JavaVersion.VERSION_11
     }
 
-    buildFeatures {
-        viewBinding true
+    sourceSets {
+        main.assets.srcDirs += "${buildDir}/generated/recorder_assets"
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
     }
 }
 
-dependencies {
-    implementation project(':audioengine')
-    implementation libs.appcompat
-    implementation libs.material
-    implementation libs.constraintlayout
-    implementation libs.recyclerview
-    implementation libs.media
-    testImplementation libs.junit
-    androidTestImplementation libs.ext.junit
-    androidTestImplementation libs.espresso.core
+def fontDir = layout.buildDirectory.dir("generated/recorder_assets/fonts")
+tasks.register("stageRecorderFont", Copy) {
+    from("src/main/res/font/cmu_serif_roman.ttf")
+    into(fontDir)
+    rename { "cmu.ttf" }
+}
+
+afterEvaluate {
+    def nativeBuildTasks = tasks.matching { it.name.startsWith("buildCMake") }
+    tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
+        dependsOn nativeBuildTasks
+        dependsOn "stageRecorderFont"
+    }
+    // Lint reads the generated assets directory directly, not the merged assets.
+    // Task names are mixed case (generateReleaseLintVitalReportModel, lintVitalAnalyzeRelease).
+    tasks.matching { it.name.toLowerCase(java.util.Locale.ROOT).contains("lint") }.configureEach {
+        dependsOn "stageRecorderFont"
+    }
 }
